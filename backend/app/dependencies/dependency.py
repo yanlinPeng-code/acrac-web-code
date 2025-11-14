@@ -7,6 +7,7 @@ from app.service.rag_v1.model_service import ModelService
 from app.service.rag_v1.rag_service import RagService
 from app.service.rag_v1.retrieval_service import RetrievalService
 from app.service.rag_v1.simple_retrieval_service import SimpleRetrievalService
+from app.service.rag_v1.evaluation_service import EvaluationService
 from app.service.rag_v1.vector_database_service import VectorDatabaseService
 
 
@@ -57,3 +58,8 @@ def get_rag_service(
 
 
 RagRecommendDep = Annotated[RagService, Depends(get_rag_service)]
+
+def get_evaluation_service():
+    return EvaluationService()
+
+EvaluationDep = Annotated[EvaluationService, Depends(get_evaluation_service)]

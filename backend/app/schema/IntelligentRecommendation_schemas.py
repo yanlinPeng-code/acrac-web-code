@@ -18,8 +18,8 @@ class PatientInfo(BaseModel):
 
 class ClinicalContext(BaseModel):
     """临床上下文信息"""
-    department: str = Field(..., description="科室名称", min_length=2, max_length=50)
-    chief_complaint: str = Field(..., description="主诉", min_length=2, max_length=500)
+    department: Optional[str]= Field(..., description="科室名称", min_length=2, max_length=50)
+    chief_complaint: Optional[str] = Field(..., description="主诉", min_length=2, max_length=500)
     medical_history: Optional[str] = Field(None, description="既往病史", max_length=2000)
     present_illness: Optional[str] = Field(None, description="现病史", max_length=2000)
     diagnosis: Optional[str] = Field(None, description="医生主诊断结果", max_length=500)
@@ -96,11 +96,12 @@ class RetrievalRequest(BaseModel):
 
 class IntelligentRecommendationRequest(BaseModel):
     """智能推荐请求模型"""
-    patient_info: PatientInfo = Field(..., description="患者基本信息")
-    clinical_context: ClinicalContext = Field(..., description="临床上下文信息")
+    patient_info: Optional[PatientInfo] = Field(..., description="患者基本信息")
+    clinical_context: Optional[ClinicalContext] = Field(..., description="临床上下文信息")
     need_optimize_query:Optional[bool]=Field(...,description="是否要优化问题")
     search_strategy: Optional[SearchStrategy] = Field(None, description="检索权重配置")
     retrieval_strategy: Optional[RetrievalRequest] = Field(None, description="检索的策略配置")
+    standard_query:Optional[str]=Field("",description="标准问题，该问题主要用于测试")
 
     @property
     def effective_retrieval_strategy(self) -> RetrievalRequest:

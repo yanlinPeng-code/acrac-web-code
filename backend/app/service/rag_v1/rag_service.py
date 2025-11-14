@@ -50,10 +50,14 @@ class RagService:
           2. 根据策略枚举执行相应的重排序逻辑
           3. 返回结构化结果
           """
+          standard_query=""
           start_time = time.time()
-
+          if request.standard_query and isinstance(request.standard_query, str):
+              standard_query = request.standard_query
           try:
               # ========== 1. 执行四阶段混合检索 ==========
+
+
               search_strategy = request.search_strategy or SearchStrategy()
 
               # 获取检索策略配置
@@ -71,6 +75,7 @@ class RagService:
               final_scenarios = await self.retrieval_service.retrieve_clinical_scenarios(
                   patient_info=request.patient_info,
                   clinical_context=request.clinical_context,
+                  standard_query=standard_query,
                   search_strategy=search_strategy,
                   need_optimize_query=request.need_optimize_query,
                   top_k=initial_top_k,
@@ -334,10 +339,13 @@ class RagService:
       async  def generate_simple_recommendation(self,
            request: IntelligentRecommendationRequest,
            medical_dict: Dict[str, Any]):
-
-
+          standard_query=""
           start_time = time.time()
           try:
+              if request.standard_query and isinstance(request.standard_query,str):
+                  standard_query=request.standard_query
+
+
               if request.retrieval_strategy.top_scenarios>=5:
                   raise ValidationException(message="请求的最大场景数不能超过5个！")
              
@@ -362,6 +370,7 @@ class RagService:
               final_scenarios = await self.retrieval_service.retrieve_clinical_scenarios(
                   patient_info=request.patient_info,
                   clinical_context=request.clinical_context,
+                  standard_query=standard_query,
                   search_strategy=search_strategy,
                   need_optimize_query=request.need_optimize_query,
                   top_k=initial_top_k,

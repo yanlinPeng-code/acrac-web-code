@@ -177,6 +177,7 @@ class RetrievalService:
         self,
         patient_info: PatientInfo,
         clinical_context: ClinicalContext,
+        standard_query:str,
         search_strategy: Optional[SearchStrategy] = None,
         need_optimize_query:Optional[bool]=False,
         top_k: int = 16,
@@ -210,17 +211,18 @@ class RetrievalService:
             search_strategy = SearchStrategy()
         
         # ========== 阶段1: LLM查询标准化（带缓存） ==========
-        logger.info("开始查询标准化...")
-        
+        if standard_query:
+            logger.info("命中已经标准化query")
+            standardized_query=standard_query
         # 生成缓存键（基于患者信息和临床上下文）
-        cache_key = await self._generate_cache_key(patient_info, clinical_context)
+        # cache_key = await self._generate_cache_key(patient_info, clinical_context)
         
         # 尝试从Redis获取缓存的标准化查询
-        cached_query = await self._get_cached_standardized_query(cache_key)
+        # cached_query = await self._get_cached_standardized_query(cache_key)
         
-        if cached_query:
-            logger.info(f"从缓存获取标准化查询: {cached_query}")
-            standardized_query = cached_query
+        # if cached_query:
+            # logger.info(f"从缓存获取标准化查询: {cached_query}")
+            # standardized_query = cached_query
         else:
             # if need_optimize_query:
             #     # 缓存未命中，调用LLM进行标准化
@@ -235,6 +237,7 @@ class RetrievalService:
             #     await self._cache_standardized_query(cache_key, standardized_query)
             #     logger.info("已将标准化查询存入缓存")
             # else:
+            logger.info("未命中标准化query,正在生成....")
             if patient_info.gender in self.gender_mapping["男性"] :
                 standardized_query=f"{patient_info.age}岁,{patient_info.gender},{clinical_context.chief_complaint}"
             else:
