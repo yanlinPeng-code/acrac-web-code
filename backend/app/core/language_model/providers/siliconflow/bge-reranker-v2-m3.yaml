@@ -1,0 +1,13 @@
+model: bge-reranker-v2-m3
+label: BAAI/bge-reranker-v2-m3
+model_type: reranker
+features:
+  - reranker
+attributes:
+  model: "BAAI/bge-reranker-v2-m3"
+metadata:
+  pricing:
+    input: 0.0000
+    output: 0.0000
+    unit: 0.001
+    currency: RMB

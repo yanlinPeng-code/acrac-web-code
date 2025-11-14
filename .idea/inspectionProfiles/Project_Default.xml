@@ -1,0 +1,31 @@
+<component name="InspectionProjectProfileManager">
+  <profile version="1.0">
+    <option name="myName" value="Project Default" />
+    <inspection_tool class="Eslint" enabled="true" level="WARNING" enabled_by_default="true" />
+    <inspection_tool class="PyInterpreterInspection" enabled="false" level="WARNING" enabled_by_default="false" />
+    <inspection_tool class="PyPackageRequirementsInspection" enabled="false" level="WARNING" enabled_by_default="false">
+      <option name="ignoredPackages">
+        <list>
+          <option value="python-dotenv" />
+          <option value="fastapi" />
+          <option value="structlog" />
+          <option value="asyncpg" />
+          <option value="psycopg2" />
+          <option value="redis" />
+          <option value="PyJWT" />
+          <option value="bcrypt" />
+          <option value="sentry_sdk" />
+          <option value="dramatiq" />
+          <option value="google-adk" />
+          <option value="litellm" />
+          <option value="langfuse" />
+          <option value="croniter" />
+          <option value="e2b-desktop" />
+          <option value="browser-use" />
+          <option value="e2b-code-interpreter" />
+          <option value="playwright" />
+        </list>
+      </option>
+    </inspection_tool>
+  </profile>
+</component>

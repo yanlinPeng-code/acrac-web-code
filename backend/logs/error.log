@@ -1,0 +1,24 @@
+[2025-10-29 14:07:18] ERROR [app] fastapi应用关闭
+[2025-10-29 14:07:18] ERROR [app] fastapi应用关闭
+[2025-10-29 14:10:36] ERROR [app] fastapi应用关闭
+[2025-10-29 14:10:36] ERROR [app] fastapi应用关闭
+[2025-10-29 14:41:14] ERROR [app.config.app_config] fastapi应用关闭
+[2025-10-29 14:41:14] ERROR [app.config.app_config] fastapi应用关闭
+[2025-10-29 14:46:49] ERROR [app.config.app_config] fastapi应用关闭
+[2025-10-29 14:46:49] ERROR [app.config.app_config] fastapi应用关闭
+[2025-10-29 14:47:52] ERROR [app.config.app_config] fastapi应用关闭
+[2025-10-29 14:47:52] ERROR [app.config.app_config] fastapi应用关闭
+[2025-10-29 14:50:24] ERROR [sql] 异步数据库会话出错: No module named 'langchain_ollama'
+[2025-10-29 14:50:24] ERROR [sql] 异步数据库会话出错: No module named 'langchain_ollama'
+[2025-10-29 14:52:24] ERROR [sql] 异步数据库会话出错: Unable to serialize unknown type: <class 'coroutine'>
+[2025-10-29 14:52:24] ERROR [sql] 异步数据库会话出错: Unable to serialize unknown type: <class 'coroutine'>
+[2025-10-29 14:53:12] ERROR [sql] 异步数据库会话出错: Unable to serialize unknown type: <class 'coroutine'>
+[2025-10-29 14:53:12] ERROR [sql] 异步数据库会话出错: Unable to serialize unknown type: <class 'coroutine'>
+[2025-10-29 14:55:17] ERROR [sql] 异步数据库会话出错: Unable to serialize unknown type: <class 'coroutine'>
+[2025-10-29 14:55:17] ERROR [sql] 异步数据库会话出错: Unable to serialize unknown type: <class 'coroutine'>
+[2025-10-29 14:55:25] ERROR [app.config.app_config] fastapi应用关闭
+[2025-10-29 14:55:25] ERROR [app.config.app_config] fastapi应用关闭
+[2025-10-29 15:03:10] ERROR [root] 获取模型失败, 错误信息: 模型配置中缺少 model 名称
+[2025-10-29 15:04:46] ERROR [root] 获取模型失败, 错误信息: 模型配置中缺少 model 名称
+[2025-10-29 15:04:54] ERROR [app.config.app_config] fastapi应用关闭
+[2025-10-29 15:04:54] ERROR [app.config.app_config] fastapi应用关闭

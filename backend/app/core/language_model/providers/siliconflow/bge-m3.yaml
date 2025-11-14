@@ -1,0 +1,20 @@
+model: bge-m3
+label: BAAI/bge-m3
+model_type: embedding
+features:
+  - embedding
+context_window: 131072
+max_output_tokens: 8196
+attributes:
+  model: "BAAI/bge-m3"
+parameters:
+  - name: dimensions
+    use_template: dimensions
+  - name: embedding_ctx_length
+    use_template: embedding_ctx_length
+metadata:
+  pricing:
+    input: 0.0000
+    output: 0.0000
+    unit: 0.001
+    currency: RMB
