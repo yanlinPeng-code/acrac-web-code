@@ -15,5 +15,6 @@ backend/.idea
 .env
 uv.lock
 
-frontend/eval-app/node_modules
+
 frontend/eval-app/dist
+frontend/eval-app/node_modules
