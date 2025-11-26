@@ -139,7 +139,7 @@ class SimpleRetrievalService:
         """
         return async_db_manager.async_session_factory()
 
-    async def simple_rank_all_scenarios(self, all_scenarios, patient_info, clinical_context, strategy, min_rating,
+    async def simple_rank_all_scenarios(self, all_scenarios, patient_info, clinical_context, strategy, min_rating, direct_return,
                                         max_scenarios, max_recommendations_per_scenario):
 
         """
@@ -152,41 +152,41 @@ class SimpleRetrievalService:
         try:
             # 根据策略执行不同的处理逻辑
             if strategy.value == RerankingStrategy.NONE.value:
-                return await self._simple_handle_none_strategy(all_scenarios, max_scenarios)
+                return await self._simple_handle_none_strategy(all_scenarios, max_scenarios, direct_return)
             elif strategy.value == RerankingStrategy.RULE_ONLY.value:
                 return await self._simple_handle_rule_only_strategy(
                     all_scenarios, patient_info, clinical_context,
-                    min_rating, max_scenarios, max_recommendations_per_scenario
+                    min_rating,  direct_return,max_scenarios, max_recommendations_per_scenario
                 )
             elif strategy.value == RerankingStrategy.LLM_SCENARIO_ONLY.value:
                 return await self._simple_handle_llm_scenario_only_strategy(
                     all_scenarios, patient_info, clinical_context,
-                    min_rating, max_scenarios, max_recommendations_per_scenario
+                    min_rating,direct_return, max_scenarios, max_recommendations_per_scenario
                 )
             elif strategy.value == RerankingStrategy.LLM_RECOMMENDATION_ONLY.value:
                 return await self._simple_handle_llm_recommendation_only_strategy(
                     all_scenarios, patient_info, clinical_context,
-                    min_rating, max_scenarios, max_recommendations_per_scenario
+                    min_rating,direct_return, max_scenarios, max_recommendations_per_scenario
                 )
             elif strategy.value == RerankingStrategy.RULE_AND_LLM_SCENARIO.value:
                 return await self._simple_handle_rule_and_llm_scenario_strategy(
                     all_scenarios, patient_info, clinical_context,
-                    min_rating, max_scenarios, max_recommendations_per_scenario
+                    min_rating,direct_return, max_scenarios, max_recommendations_per_scenario
                 )
             elif strategy.value == RerankingStrategy.RULE_AND_LLM_RECOMMENDATION.value:
                 return await self._simple_handle_rule_and_llm_recommendation_strategy(
                     all_scenarios, patient_info, clinical_context,
-                    min_rating, max_scenarios, max_recommendations_per_scenario
+                    min_rating,direct_return, max_scenarios, max_recommendations_per_scenario
                 )
             elif strategy.value == RerankingStrategy.LLM_SCENARIO_AND_RECOMMENDATION.value:
                 return await self._simple_handle_llm_scenario_and_recommendation_strategy(
                     all_scenarios, patient_info, clinical_context,
-                    min_rating, max_scenarios, max_recommendations_per_scenario
+                    min_rating,direct_return, max_scenarios, max_recommendations_per_scenario
                 )
             elif strategy.value == RerankingStrategy.ALL.value:
                 return await self._simple_handle_all_strategy(
                     all_scenarios, patient_info, clinical_context,
-                    min_rating, max_scenarios, max_recommendations_per_scenario
+                    min_rating,direct_return, max_scenarios, max_recommendations_per_scenario
                 )
             else:
                 logger.warning(f"未知策略: {strategy}，使用默认处理")
@@ -196,7 +196,7 @@ class SimpleRetrievalService:
             logger.error(f"处理策略 {strategy} 时发生错误: {e}")
             return []
 
-    async def _simple_handle_none_strategy(self, all_scenarios, max_scenarios):
+    async def _simple_handle_none_strategy(self, all_scenarios, max_scenarios,direct_return):
         """策略1: 无重排序，直接返回"""
         logger.info(f"策略1-NONE: 直接返回前{max_scenarios}个场景")
         return all_scenarios[:max_scenarios]
@@ -204,7 +204,7 @@ class SimpleRetrievalService:
 
 
 
-    async def _simple_handle_all_strategy(self, all_scenarios, patient_info, clinical_context, min_rating,
+    async def _simple_handle_all_strategy(self, all_scenarios, patient_info, clinical_context, min_rating,direct_return,
                                           max_scenarios, max_recommendations_per_scenario):
         """策略8: 全部启用 - 规则重排序 + LLM场景重排序 + LLM推荐项目重排序"""
         logger.info(f"策略8-ALL: 规则重排序 + LLM场景重排序 + LLM推荐项目重排序")
@@ -259,7 +259,7 @@ class SimpleRetrievalService:
 
         # 第二步：LLM推荐项目重排序
         recommendations = await self.get_recommendations_simple(
-            ranked_scenarios, patient_info, clinical_context, max_scenarios,
+            ranked_scenarios, patient_info, clinical_context,direct_return, max_scenarios,
             max_recommendations_per_scenario
         )
 
@@ -268,7 +268,7 @@ class SimpleRetrievalService:
 
 
     async def _simple_handle_llm_scenario_and_recommendation_strategy(self, all_scenarios, patient_info,
-                                                                      clinical_context, min_rating, max_scenarios,
+                                                                      clinical_context, min_rating,direct_return, max_scenarios,
                                                                       max_recommendations_per_scenario):
 
         """策略7: LLM场景+推荐项目重排序"""
@@ -286,14 +286,14 @@ class SimpleRetrievalService:
 
         # 第二步：LLM推荐项目重排序
         recommendations = await self.get_recommendations_simple(
-            filter_scenario_with_recommendations, patient_info, clinical_context, max_scenarios,
+            filter_scenario_with_recommendations, patient_info, clinical_context,direct_return, max_scenarios,
             max_recommendations_per_scenario
         )
 
         return recommendations
 
     async def _simple_handle_rule_and_llm_recommendation_strategy(self, all_scenarios, patient_info, clinical_context,
-                                                                  min_rating, max_scenarios,
+                                                                  min_rating, direct_return,max_scenarios,
                                                                   max_recommendations_per_scenario):
         """策略6: 规则+LLM推荐项目重排序"""
         logger.info(f"策略6-RULE_AND_LLM_RECOMMENDATION: 规则重排序后LLM推荐项目重排序")
@@ -318,7 +318,7 @@ class SimpleRetrievalService:
         # 第二步：LLM推荐项目重排序
         # 使用自适应引擎进行LLM推荐项目重排序
         recommendations = await self.get_recommendations_simple(
-            rule_ranked_scenarios , patient_info, clinical_context, max_scenarios,
+            rule_ranked_scenarios , patient_info, clinical_context,direct_return, max_scenarios,
             max_recommendations_per_scenario
         )
 
@@ -326,7 +326,7 @@ class SimpleRetrievalService:
 
 
     async def _simple_handle_rule_and_llm_scenario_strategy(self, all_scenarios, patient_info, clinical_context,
-                                                            min_rating, max_scenarios,
+                                                            min_rating, direct_return,max_scenarios,
                                                             max_recommendations_per_scenario):
 
         """策略5: 规则+LLM场景重排序"""
@@ -366,7 +366,7 @@ class SimpleRetrievalService:
 
 
     async def _simple_handle_llm_recommendation_only_strategy(self, all_scenarios, patient_info, clinical_context,
-                                                              min_rating, max_scenarios,
+                                                              min_rating, direct_return,max_scenarios,
                                                               max_recommendations_per_scenario):
         """策略4: 仅LLM推荐项目重排序"""
         logger.info(f"策略4-LLM_RECOMMENDATION_ONLY: 对前{max_scenarios}个场景进行LLM推荐项目重排序")
@@ -383,13 +383,13 @@ class SimpleRetrievalService:
                                                 scenario_with_recommendation["recommendations"]]
         # 使用自适应引擎进行LLM推荐项目重排序
         recommendations = await self.get_recommendations_simple(
-            filter_scenario_with_recommendations, patient_info, clinical_context,max_scenarios,
+            filter_scenario_with_recommendations, patient_info, clinical_context,direct_return,max_scenarios,
             max_recommendations_per_scenario
         )
 
         return recommendations
 
-    async def _simple_handle_llm_scenario_only_strategy(self, all_scenarios, patient_info, clinical_context, min_rating,
+    async def _simple_handle_llm_scenario_only_strategy(self, all_scenarios, patient_info, clinical_context, min_rating,direct_return,
                                                         max_scenarios, max_recommendations_per_scenario):
         """策略3: 仅LLM场景重排序"""
         logger.info(f"策略3-LLM_SCENARIO_ONLY: LLM重排序{max_scenarios}个场景")
@@ -415,7 +415,7 @@ class SimpleRetrievalService:
         return assemble_database_results(llm_ranked_scenarios, patient_info, clinical_context, max_scenarios,
                                          max_recommendations_per_scenario)
 
-    async def _simple_handle_rule_only_strategy(self, all_scenarios, patient_info, clinical_context, min_rating,
+    async def _simple_handle_rule_only_strategy(self, all_scenarios, patient_info, clinical_context, min_rating,direct_return,
                                                 max_scenarios, max_recommendations_per_scenario):
         """策略2: 仅规则重排序"""
         logger.info(f"策略2-RULE_ONLY: 规则重排序{max_scenarios}个场景")
@@ -1702,10 +1702,10 @@ class SimpleRetrievalService:
 
         return ""
 
-    async def get_recommendations_simple(self, filter_scenario_with_recommendations, patient_info, clinical_context,max_scenarios,
+    async def get_recommendations_simple(self, filter_scenario_with_recommendations, patient_info, clinical_context,direct_return,max_scenarios,
                                          max_recommendations_per_scenario):
         # 开始让llm根据病症做推荐
-        prompt=self._build_comprehensive_prompt_with_grading(filter_scenario_with_recommendations, patient_info, clinical_context,max_scenarios,max_recommendations_per_scenario)
+        prompt=self._build_comprehensive_prompt_with_grading(filter_scenario_with_recommendations, patient_info, clinical_context,direct_return,max_scenarios,max_recommendations_per_scenario)
         try:
             # 单次LLM调用
             response = await self.ai_service._call_llm(prompt)
@@ -1799,60 +1799,66 @@ class SimpleRetrievalService:
             all_scenarios: List[Dict[str, Any]],
             patient_info: PatientInfo,
             clinical_context: ClinicalContext,
+            direct_return:bool,
             max_scenarios: int,
             max_recommendations_per_scenario: int
     ) -> str:
         """构建完整的提示词，确保总token数不超过3600"""
-
         # 构建各个部分
-        import qwen_token_counter
-        patient_info_content = self.build_patient_context(patient_info)
-        clinical_context_content = self.build_clinical_context(clinical_context)
+        try:
+                import qwen_token_counter
+                patient_info_content = self.build_patient_context(patient_info)
+                clinical_context_content = self.build_clinical_context(clinical_context)
 
-        # 计算固定部分的token数
-        fixed_parts = patient_info_content + clinical_context_content
-        fixed_tokens = qwen_token_counter.get_token_count(fixed_parts)
+                # 计算固定部分的token数
+                fixed_parts = patient_info_content + clinical_context_content
+                fixed_tokens = qwen_token_counter.get_token_count(fixed_parts)
 
-        # 为任务指令预留空间（估计约500-800 token）
-        task_reserve_tokens = 900
-        available_scenario_tokens = self.adaptive_recommendation_engine_service.strategy.threshold_config["token_threshold"]-800 - fixed_tokens - task_reserve_tokens
-        logger.info(f"可用的提示词token数{available_scenario_tokens}")
-        # 构建场景内容，限制在可用token数内
-        scenarios_content = self.build_scenarios_with_recommend(
-            all_scenarios,
-            patient_info,
-            max_tokens=available_scenario_tokens
-        )
+                # 为任务指令预留空间（估计约500-800 token）
+                task_reserve_tokens = 900
+                available_scenario_tokens = self.adaptive_recommendation_engine_service.strategy.threshold_config["token_threshold"]-800 - fixed_tokens - task_reserve_tokens
+                logger.info(f"可用的提示词token数{available_scenario_tokens}")
+                # 构建场景内容，限制在可用token数内
+                scenarios_content = self.build_scenarios_with_recommend(
+                    all_scenarios,
+                    patient_info,
+                    max_tokens=available_scenario_tokens
+                )
 
-        # 构建任务指令，使用实际显示的场景数量
-        task_instruction = self.build_task_instruction(
-            max_scenarios=max_scenarios,
-            max_recommendations_per_scenario=max_recommendations_per_scenario
-        )
+                # 构建任务指令，使用实际显示的场景数量
+                task_instruction = self.build_task_instruction(
+                    direct_return=direct_return,
+                    max_scenarios=max_scenarios,
+                    max_recommendations_per_scenario=max_recommendations_per_scenario
+                )
 
-        # 组合完整提示词
-        comprehensive_prompt = (
-                patient_info_content +
-                clinical_context_content +
-                scenarios_content +
-                task_instruction
-        )
+                # 组合完整提示词
+                comprehensive_prompt = (
+                        patient_info_content +
+                        clinical_context_content +
+                        scenarios_content +
+                        task_instruction
+                )
 
-        # 最终token计数验证
-        total_tokens = qwen_token_counter.get_token_count(comprehensive_prompt)
-        if total_tokens > self.adaptive_recommendation_engine_service.strategy.threshold_config["token_threshold"]-800:
-            logger.info(f"仍然超出{4096-800-total_tokens}个token,进行截断")
-            # 如果仍然超出，进一步截断场景部分
-            scenarios_content = self._truncate_scenarios_further(scenarios_content,
-                                                                 available_scenario_tokens - fixed_tokens - task_reserve_tokens)
-            comprehensive_prompt = (
-                    patient_info_content +
-                    clinical_context_content +
-                    scenarios_content +
-                    task_instruction
-            )
+                # 最终token计数验证
+                total_tokens = qwen_token_counter.get_token_count(comprehensive_prompt)
+                if total_tokens > self.adaptive_recommendation_engine_service.strategy.threshold_config["token_threshold"]-800:
+                    logger.info(f"仍然超出{4096-800-total_tokens}个token,进行截断")
+                    # 如果仍然超出，进一步截断场景部分
+                    scenarios_content = self._truncate_scenarios_further(scenarios_content,
+                                                                         available_scenario_tokens - fixed_tokens - task_reserve_tokens)
+                    comprehensive_prompt = (
+                            patient_info_content +
+                            clinical_context_content +
+                            scenarios_content +
+                            task_instruction
+                    )
 
-        return comprehensive_prompt
+                return comprehensive_prompt
+        except Exception as e:
+            logger.info(f"构建提示词错误：{e}")
+            return ""
+
 
 
 
@@ -2049,104 +2055,120 @@ class SimpleRetrievalService:
 
         return scenarios_text
 
-    def build_task_instruction(self, max_scenarios: int,
+    def build_task_instruction(self, direct_return:bool,max_scenarios: int,
                                max_recommendations_per_scenario: int):
         """构建任务指令"""
-        task_instruction = f"""
-
-        ## 🎯 任务目标
-        基于循证医学原则，为当前患者选择最合适的影像学检查方案。
-
-        ## 📋 决策框架
-
-        ### 第一级：场景筛选
-        从给你的上下文的临床场景中，选择{max_scenarios}个最相关的临床场景：
-        - **临床匹配度**：场景描述与患者主诉、诊断的契合程度
-        - **科室适用性**：场景与就诊科室专业特长的匹配度
-        - **人群适应性**：场景适用人群与患者特征的符合度
-
-        ### 第二级：检查项目分级
-        对每个选中场景，按以下标准分级：
-
-        #### 🟢 极其推荐 (Highly Recommended)
-        - 无明确禁忌症
-        - 与当前临床问题高度相关
-        - 诊断价值明确且风险可控
-
-        #### 🟡 推荐 (Recommended)  
-        - 无重大禁忌症
-        - 临床适用性良好
-        - 可作为辅助或替代方案
-
-        #### 🔴 不太推荐 (Less Recommended)
-        - 存在明确禁忌症
-        - 与临床需求匹配度低
-        - 有更优的替代方案
-
-        ## ⚠️ 安全优先原则
-
-        ### 绝对禁忌
-        1. **妊娠期**：严格避免电离辐射检查（CT、X线、PET-CT）
-        2. **对比剂过敏**：禁用含碘/钆对比剂的增强检查
-        3. **肾功能不全**：慎用对比剂，评估肾病风险
-
-        ### 相对禁忌
-        1. **幽闭恐惧症**：MRI检查需特殊准备
-        2. **金属植入物**：部分MRI受限
-        3. **肥胖患者**：考虑设备承重和图像质量限制
-
-        ## 🎛️ 技术考量
-
-        ### 诊断效能优先级
-        1. **敏感性/特异性**：疾病的检测和排除能力
-        2. **空间分辨率**：解剖细节显示能力
-        3. **功能信息**：除形态学外的功能评估
-        4. **检查时长**：患者耐受度和临床紧迫性
-
-        ## 📊 输出要求
-
-        请严格按照以下JSON格式输出推荐结果：
-
-        ```json
-        {{
-            "selected_scenarios": [
-                {{
-                    "scenario_index": 1,
-                    "scenario_id": "场景语义ID",
-                    "comprehensive_score": 85,
-                    "scenario_reasoning": "基于患者急性腹痛主诉和年龄因素，此腹部急症场景最为匹配",
-                    "recommendation_grades": {{
-                        "highly_recommended": [1, 2],
-                        "recommended": [3],
-                        "less_recommended": [4, 5]
+        if direct_return:
+            task_instruction = f"""
+    
+            ## 🎯 任务目标
+            基于循证医学原则，为当前患者选择最合适的影像学检查方案。
+    
+            ## 📋 决策框架
+    
+            ### 第一级：场景筛选
+            从给你的上下文的临床场景中，选择{max_scenarios}个最相关的临床场景：
+            - **临床匹配度**：场景描述与患者主诉、诊断的契合程度
+            - **科室适用性**：场景与就诊科室专业特长的匹配度
+            - **人群适应性**：场景适用人群与患者特征的符合度
+    
+            ### 第二级：检查项目分级
+            对每个选中场景，按以下标准分级：
+    
+            #### 🟢 极其推荐 (Highly Recommended)
+            - 无明确禁忌症
+            - 与当前临床问题高度相关
+            - 诊断价值明确且风险可控
+    
+            #### 🟡 推荐 (Recommended)  
+            - 无重大禁忌症
+            - 临床适用性良好
+            - 可作为辅助或替代方案
+    
+            #### 🔴 不太推荐 (Less Recommended)
+            - 存在明确禁忌症
+            - 与临床需求匹配度低
+            - 有更优的替代方案
+    
+            ## ⚠️ 安全优先原则
+    
+            ### 绝对禁忌
+            1. **妊娠期**：严格避免电离辐射检查（CT、X线、PET-CT）
+            2. **对比剂过敏**：禁用含碘/钆对比剂的增强检查
+            3. **肾功能不全**：慎用对比剂，评估肾病风险
+    
+            ### 相对禁忌
+            1. **幽闭恐惧症**：MRI检查需特殊准备
+            2. **金属植入物**：部分MRI受限
+            3. **肥胖患者**：考虑设备承重和图像质量限制
+    
+            ## 🎛️ 技术考量
+    
+            ### 诊断效能优先级
+            1. **敏感性/特异性**：疾病的检测和排除能力
+            2. **空间分辨率**：解剖细节显示能力
+            3. **功能信息**：除形态学外的功能评估
+            4. **检查时长**：患者耐受度和临床紧迫性
+    
+            ## 📊 输出要求
+    
+            请严格按照以下JSON格式输出推荐结果：
+    
+            ```json
+            {{
+                "selected_scenarios": [
+                    {{
+                        "scenario_index": 1,
+                        "scenario_id": "场景语义ID",
+                        "comprehensive_score": 85,
+                        "scenario_reasoning": "基于患者急性腹痛主诉和年龄因素，此腹部急症场景最为匹配",
+                        "recommendation_grades": {{
+                            "highly_recommended": [1, 2],
+                            "recommended": [3],
+                            "less_recommended": [4, 5]
+                        }},
+                        "final_choices": [该场景下针对该患者的最佳推荐项目，注意！填推荐项目的名字，且推荐项目名字必须为{max_recommendations_per_scenario}个！],
+                        "grading_reasoning": "CT平扫ACR评分9分，对急腹症诊断价值最高；超声无辐射，适合初步筛查"
                     }},
-                    "final_choices": [该场景下针对该患者的最佳推荐项目，注意！填推荐项目的名字，且推荐项目名字必须为{max_recommendations_per_scenario}个！],
-                    "grading_reasoning": "CT平扫ACR评分9分，对急腹症诊断价值最高；超声无辐射，适合初步筛查"
-                }},
-                {{
-                    "scenario_index": 这里是索引id(例如：2),
-                    "scenario_id": "场景语义ID",
-                    "comprehensive_score": "0-100综合评分",
-                    "scenario_reasoning": "场景匹配度分析",
-                    "recommendation_grades": {{
-                                  "highly_recommended": [1, 3],
-                                  "recommended": [2, 4],
-                                  "less_recommended": [5]
+                    {{
+                        "scenario_index": 这里是索引id(例如：2),
+                        "scenario_id": "场景语义ID",
+                        "comprehensive_score": "0-100综合评分",
+                        "scenario_reasoning": "场景匹配度分析",
+                        "recommendation_grades": {{
+                                      "highly_recommended": [1, 3],
+                                      "recommended": [2, 4],
+                                      "less_recommended": [5]
+                                  }},
+                        "final_choices":[该场景下针对该患者的最佳推荐项目，注意！填推荐项目的名字，且推荐项目名字必须为{max_recommendations_per_scenario}个！]
+                        "grading_reasoning": "分级临床理由"
                               }},
-                    "final_choices":[该场景下针对该患者的最佳推荐项目，注意！填推荐项目的名字，且推荐项目名字必须为{max_recommendations_per_scenario}个！]
-                    "grading_reasoning": "分级临床理由"
-                          }},
-            ],
-            "overall_reasoning": "总体选择策略，重点说明安全性考量和诊断路径"
-        }}
-         **重要：
-              -请只输出纯JSON格式，不要包含任何其他文字、说明或Markdown标记！确保JSON格式完全正确。**
-              -注意选择的临床场景数一定不能超过{max_scenarios}个！
+                ],
+                "overall_reasoning": "总体选择策略，重点说明安全性考量和诊断路径"
+            }}
+             **重要：
+                  -请只输出纯JSON格式，不要包含任何其他文字、说明或Markdown标记！确保JSON格式完全正确。**
+                  -注意选择的临床场景数一定不能超过{max_scenarios}个！
+            """
+
+
+
+            return task_instruction
+        return  f"""
+        ## 任务说明
+        基于患者信息与临床上下文，以及给定的场景下可供选择的推荐项目，直接给出最终推荐及其原因。
+
+        ### 输出要求（纯文本，中文）
+        - 仅输出文本，不要JSON或其他标记，不要包含额外的解释性段落。
+        - 
+          1) 先输出“推荐项目”：列出最适合患者信息和临床上下文{max_recommendations_per_scenario} 个项目，按优先级从高到低，仅写项目名称，用顿号或逗号分隔。
+          2) 再输出“推荐理由”：简要说明选择依据，结合患者与场景信息，语言精炼。
+        - 严格遵守“先推荐项目，再推荐理由”的顺序。
+
+        ### 文本示例（示意）：
+        推荐项目：项目A，项目B，项目C
+        推荐理由：……
         """
-
-
-
-        return task_instruction
 
 
 

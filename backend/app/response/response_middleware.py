@@ -47,7 +47,6 @@ class ResponseMiddleware(BaseHTTPMiddleware):
                 # 明确的JSONResponse
                 response = await self._process_json_response(response, request_id, client_ip)
             else:
-                print("Response is not JSONResponse")
                 # 对于非JSON响应，我们也确保添加必要的头部信息
                 response = await self._process_general_response(response, request_id, client_ip)
 

@@ -116,7 +116,12 @@ class Settings(BaseSettings):
     DASHSCOPE_EMBEDDING_MODEL: str=Field(default="text-embedding-v3", description="DashScope的嵌入模型名称")
     DASHSCOPE_API_KEY: str = os.getenv("DASHSCOPE_API_KEY", "")
     DASHSCOPE_BASE_URL: str = os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
-    
+    #deepseek在线模型配置
+    DEEPSEEK_API_KEY:str=Field(default=None,description="deepseek在线api_key")
+    DEEPSEEK_BASE_URL:str=Field(default="https://api.deepseek.com/v1",description="deepseek在线base_url")
+    DEEPSEEK_MODEL_NAME:str=Field(default="deepseek-chat",description="deepseek模型名称")
+
+
     # Ollama Configuration
     OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
     OLLAMA_LLM_MODEL: str = os.getenv("OLLAMA_LLM_MODEL", "qwen3:30b")

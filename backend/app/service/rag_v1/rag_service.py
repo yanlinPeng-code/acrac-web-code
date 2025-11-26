@@ -1,8 +1,5 @@
-import random
 from typing import Any, Dict, List
 import time
-
-from fastapi import HTTPException
 from sqlmodel.ext.asyncio.session import AsyncSession
 from app.core.language_model.model_client_wrapper import ChatClientSDK, EmbeddingClientSDK, RerankerClientSDK
 from app.entity.model_entity import DEFAULT_APP_CONFIG
@@ -16,6 +13,7 @@ from app.schema.IntelligentRecommendation_schemas import (
 from app.service.rag_v1.model_service import ModelService
 from app.service.rag_v1.retrieval_service import RetrievalService
 from app.service.rag_v1.simple_retrieval_service import SimpleRetrievalService
+from app.service.rag_v1.adaptive_recommend_service import AdaptiveRecommendationEngineService
 from app.utils.logger.simple_logger import get_logger
 logger = get_logger(__name__)
 """
@@ -41,7 +39,7 @@ class RagService:
               self,
               request: IntelligentRecommendationRequest,
               medical_dict: Dict[str, Any]
-      ) -> IntelligentRecommendationResponse:
+              ) -> IntelligentRecommendationResponse:
           """
           生成智能推荐 - 使用策略枚举统一处理
 
@@ -77,7 +75,6 @@ class RagService:
                   clinical_context=request.clinical_context,
                   standard_query=standard_query,
                   search_strategy=search_strategy,
-                  need_optimize_query=request.need_optimize_query,
                   top_k=initial_top_k,
                   similarity_threshold=retrieval_config.similarity_threshold,
                   medical_dict=medical_dict
@@ -90,6 +87,7 @@ class RagService:
                   clinical_context=request.clinical_context,
                   strategy=strategy,
                   min_rating=retrieval_config.min_appropriateness_rating or 5,
+                  direct_return=request.direct_return,
                   max_scenarios=retrieval_config.top_scenarios,
                   max_recommendations_per_scenario=retrieval_config.top_recommendations_per_scenario
               )
@@ -115,6 +113,43 @@ class RagService:
                   error_message=str(e)
               )
 
+      async def stream_direct_recommendation(
+              self,
+              request: IntelligentRecommendationRequest,
+              medical_dict: Dict[str, Any]
+      ):
+          """流式返回LLM生成的直接推荐文本（先推荐项目，再推荐理由）。"""
+          search_strategy = request.search_strategy or SearchStrategy()
+          retrieval_config = request.retrieval_strategy or RetrievalRequest()
+          initial_top_k = self._calculate_initial_top_k(retrieval_config)
+
+          scenarios = await self.retrieval_service.retrieve_clinical_scenarios(
+              patient_info=request.patient_info,
+              clinical_context=request.clinical_context,
+              standard_query=request.standard_query or "",
+              search_strategy=search_strategy,
+              need_optimize_query=request.need_optimize_query,
+              top_k=initial_top_k,
+              similarity_threshold=retrieval_config.similarity_threshold,
+              medical_dict=medical_dict
+          )
+          scenarios_with_recs = await self.retrieval_service.get_scenarios_with_recommends(
+              scenarios,
+              max_scenarios=retrieval_config.top_scenarios,
+              max_recommendations_per_scenario=retrieval_config.top_recommendations_per_scenario,
+              min_rating=retrieval_config.min_appropriateness_rating or 5
+          )
+          engine = AdaptiveRecommendationEngineService()
+          prompt = engine._build_single_call_prompt(
+              confirmed_scenarios=scenarios_with_recs,
+              patient_info=request.patient_info,
+              clinical_context=request.clinical_context,
+              max_recommendations_per_scenario=retrieval_config.top_recommendations_per_scenario,
+              direct_return=True
+          )
+          async for chunk in self.retrieval_service.ai_service._stream_llm(prompt):
+              yield chunk
+
       def _calculate_initial_top_k(self, retrieval_config: RetrievalRequest) -> int:
           """计算初始检索数量"""
           strategy = retrieval_config.reranking_strategy
@@ -135,207 +170,6 @@ class RagService:
           multiplier = strategy_multipliers.get(strategy, 3)
           return max(30, base_k * multiplier)
 
-      # """统一检索服务 - 处理所有重排序策略"""
-      #
-      # async def execute_unified_retrieval(self, request: IntelligentRecommendationRequest,medical_dict: Dict[str, Any]):
-      #     """执行统一的检索管道"""
-      #
-      #     retrieval_strategy = request.effective_retrieval_strategy
-      #     strategy = retrieval_strategy.reranking_strategy
-      #
-      #     logger.info(f"🚀 开始统一检索，策略: {strategy.value}")
-      #     logger.info(f"   规则过滤: {retrieval_strategy.apply_rule_filter}, "
-      #                 f"LLM重排序: {retrieval_strategy.enable_reranking}, "
-      #                 f"LLM推荐: {retrieval_strategy.need_llm_recommendations}")
-      #
-      #     # 1. 初始检索
-      #     scenarios = await self._initial_retrieval(request, retrieval_strategy,medical_dict)
-      #
-      #     # 2. 根据策略应用重排序
-      #     scenarios = await self._apply_reranking_by_strategy(scenarios, request, retrieval_strategy, strategy)
-      #
-      #     logger.info(f"✅ 统一检索完成，返回 {len(scenarios)} 个场景")
-      #     return scenarios
-      #
-      # async def _initial_retrieval(self, request: IntelligentRecommendationRequest,
-      #                              retrieval_strategy: RetrievalRequest,medical_dict: Dict[str, Any]):
-      #     """初始混合检索"""
-      #     initial_top_k = self._calculate_initial_top_k(retrieval_strategy)
-      #
-      #     scenarios = await self.retrieval_service.retrieve_clinical_scenarios(
-      #         patient_info=request.patient_info,
-      #         clinical_context=request.clinical_context,
-      #         search_strategy=request.search_strategy or SearchStrategy(),
-      #         top_k=initial_top_k,
-      #         similarity_threshold=retrieval_strategy.similarity_threshold,
-      #         medical_dict=medical_dict
-      #     )
-      #
-      #     logger.info(f"🔍 初始检索完成: {len(scenarios)} 个场景")
-      #     return scenarios
-      #
-      # async def _apply_reranking_by_strategy(self, scenarios, request: IntelligentRecommendationRequest,
-      #                                        retrieval_strategy: RetrievalRequest, strategy: RerankingStrategy):
-      #     """根据策略应用重排序"""
-      #
-      #     # 策略映射到具体的处理函数
-      #     strategy_handlers = {
-      #         RerankingStrategy.NONE: self._handle_none,
-      #         RerankingStrategy.RULE_ONLY: self._handle_rule_only,
-      #         RerankingStrategy.LLM_SCENARIO_ONLY: self._handle_llm_scenario_only,
-      #         RerankingStrategy.LLM_RECOMMENDATION_ONLY: self._handle_llm_recommendation_only,
-      #         RerankingStrategy.RULE_AND_LLM_SCENARIO: self._handle_rule_and_llm_scenario,
-      #         RerankingStrategy.RULE_AND_LLM_RECOMMENDATION: self._handle_rule_and_llm_recommendation,
-      #         RerankingStrategy.LLM_SCENARIO_AND_RECOMMENDATION: self._handle_llm_scenario_and_recommendation,
-      #         RerankingStrategy.ALL: self._handle_all
-      #     }
-      #
-      #     handler = strategy_handlers.get(strategy, self._handle_none)
-      #     return await handler(scenarios, request, retrieval_strategy)
-      #
-      #     # ========== 策略处理函数 ==========
-      #
-      # async def _handle_none(self, scenarios, request, retrieval_strategy):
-      #     """无重排序 - 直接截取"""
-      #     return scenarios[:retrieval_strategy.top_scenarios]
-      #
-      # async def _handle_rule_only(self, scenarios, request, retrieval_strategy):
-      #     """仅规则重排序"""
-      #     return await self._apply_rule_reranking(scenarios, request, retrieval_strategy)
-      #
-      # async def _handle_llm_scenario_only(self, scenarios, request, retrieval_strategy):
-      #     """仅LLM场景重排序"""
-      #     return await self._apply_llm_scenario_reranking(scenarios, request, retrieval_strategy)
-      #
-      # async def _handle_llm_recommendation_only(self, scenarios, request, retrieval_strategy):
-      #     """仅LLM推荐项目重排序"""
-      #     # 先截取目标数量的场景
-      #     scenarios = scenarios[:retrieval_strategy.top_scenarios]
-      #     # 然后对推荐项目进行LLM重排序
-      #     return await self._apply_llm_recommendation_reranking(scenarios, request, retrieval_strategy)
-      #
-      # async def _handle_rule_and_llm_scenario(self, scenarios, request, retrieval_strategy):
-      #     """规则+LLM场景重排序"""
-      #     scenarios = await self._apply_rule_reranking(scenarios, request, retrieval_strategy)
-      #     return await self._apply_llm_scenario_reranking(scenarios, request, retrieval_strategy)
-      #
-      # async def _handle_rule_and_llm_recommendation(self, scenarios, request, retrieval_strategy):
-      #     """规则+LLM推荐项目重排序"""
-      #     scenarios = await self._apply_rule_reranking(scenarios, request, retrieval_strategy)
-      #     return await self._apply_llm_recommendation_reranking(scenarios, request, retrieval_strategy)
-      #
-      # async def _handle_llm_scenario_and_recommendation(self, scenarios, request, retrieval_strategy):
-      #     """LLM场景+推荐项目重排序"""
-      #     return await self._apply_llm_full_reranking(scenarios, request, retrieval_strategy)
-      #
-      # async def _handle_all(self, scenarios, request, retrieval_strategy):
-      #     """全部启用"""
-      #     scenarios = await self._apply_rule_reranking(scenarios, request, retrieval_strategy)
-      #     return await self._apply_llm_full_reranking(scenarios, request, retrieval_strategy)
-      #
-      #     # ========== 具体的重排序实现 ==========
-      #
-      # async def _apply_rule_reranking(self, scenarios, request, retrieval_strategy):
-      #     """应用规则重排序"""
-      #     rule_top_k = self._calculate_rule_top_k(retrieval_strategy)
-      #
-      #     ranked_scenarios = await self.retrieval_service.hybrid_rank_scenarios(
-      #         scenarios=scenarios,
-      #         patient_info=request.patient_info,
-      #         clinical_context=request.clinical_context,
-      #         top_k=rule_top_k,
-      #         enable_llm=False
-      #     )
-      #
-      #     logger.info(f"📊 规则重排序完成: {len(ranked_scenarios)} 个场景")
-      #     return ranked_scenarios
-      #
-      # async def _apply_llm_scenario_reranking(self, scenarios, request, retrieval_strategy):
-      #     """应用LLM场景重排序"""
-      #     ranked_scenarios = await self.retrieval_service.llm_rank_all_scenarios(
-      #         all_scenarios=scenarios,
-      #         patient_info=request.patient_info,
-      #         clinical_context=request.clinical_context,
-      #         need_llm_recommendations=False,
-      #         need_llm_select_scenarios=True,
-      #         min_rating=retrieval_strategy.min_appropriateness_rating or 5,
-      #         max_scenarios=retrieval_strategy.top_scenarios,
-      #         max_recommendations_per_scenario=0
-      #     )
-      #
-      #     logger.info(f"🧠 LLM场景重排序完成: {len(ranked_scenarios)} 个场景")
-      #     return ranked_scenarios
-      #
-      # async def _apply_llm_recommendation_reranking(self, scenarios, request, retrieval_strategy):
-      #     """应用LLM推荐项目重排序"""
-      #     ranked_scenarios = await self.retrieval_service.llm_rank_all_scenarios(
-      #         all_scenarios=scenarios,
-      #         patient_info=request.patient_info,
-      #         clinical_context=request.clinical_context,
-      #         need_llm_recommendations=True,
-      #         need_llm_select_scenarios=False,
-      #         min_rating=retrieval_strategy.min_appropriateness_rating or 5,
-      #         max_scenarios=len(scenarios),
-      #         max_recommendations_per_scenario=retrieval_strategy.top_recommendations_per_scenario
-      #     )
-      #
-      #     logger.info(f"🎯 LLM推荐项目重排序完成: {len(ranked_scenarios)} 个场景")
-      #     return ranked_scenarios
-      #
-      # async def _apply_llm_full_reranking(self, scenarios, request, retrieval_strategy):
-      #     """应用完整的LLM重排序（场景+推荐项目）"""
-      #     ranked_scenarios = await self.retrieval_service.llm_rank_all_scenarios(
-      #         all_scenarios=scenarios,
-      #         patient_info=request.patient_info,
-      #         clinical_context=request.clinical_context,
-      #         need_llm_recommendations=True,
-      #         need_llm_select_scenarios=True,
-      #         min_rating=retrieval_strategy.min_appropriateness_rating or 5,
-      #         max_scenarios=retrieval_strategy.top_scenarios,
-      #         max_recommendations_per_scenario=retrieval_strategy.top_recommendations_per_scenario
-      #     )
-      #
-      #     logger.info(f"🌟 完整LLM重排序完成: {len(ranked_scenarios)} 个场景")
-      #     return ranked_scenarios
-      #
-      #     # ========== 智能参数计算 ==========
-      #
-      # def _calculate_initial_top_k(self, retrieval_strategy: RetrievalRequest):
-      #     """计算初始检索数量"""
-      #     strategy = retrieval_strategy.reranking_strategy
-      #
-      #     # 根据策略决定初始检索数量
-      #     strategy_multipliers = {
-      #         RerankingStrategy.NONE: 1,
-      #         RerankingStrategy.RULE_ONLY: 3,
-      #         RerankingStrategy.LLM_SCENARIO_ONLY: 4,
-      #         RerankingStrategy.LLM_RECOMMENDATION_ONLY: 1,  # 不需要太多，后面会截取
-      #         RerankingStrategy.RULE_AND_LLM_SCENARIO: 5,
-      #         RerankingStrategy.RULE_AND_LLM_RECOMMENDATION: 4,
-      #         RerankingStrategy.LLM_SCENARIO_AND_RECOMMENDATION: 4,
-      #         RerankingStrategy.ALL: 6
-      #     }
-      #
-      #     multiplier = strategy_multipliers.get(strategy, 3)
-      #     return max(30, retrieval_strategy.top_scenarios * multiplier)
-      #
-      # def _calculate_rule_top_k(self, retrieval_strategy: RetrievalRequest):
-      #     """计算规则重排序的top_k"""
-      #     strategy = retrieval_strategy.reranking_strategy
-      #
-      #     # 根据后续是否有LLM场景重排序调整规则重排序的严格程度
-      #     needs_llm_scenario_reranking = strategy in [
-      #         RerankingStrategy.RULE_AND_LLM_SCENARIO,
-      #         RerankingStrategy.ALL
-      #     ]
-      #
-      #     if needs_llm_scenario_reranking:
-      #         # 如果有后续LLM场景重排序，规则可以宽松一些
-      #         return min(25, retrieval_strategy.top_scenarios * 3)
-      #     else:
-      #         # 如果没有后续重排序，规则需要精确筛选
-      #         return retrieval_strategy.top_scenarios
-      #
       async  def generate_simple_recommendation(self,
            request: IntelligentRecommendationRequest,
            medical_dict: Dict[str, Any]):
@@ -372,7 +206,6 @@ class RagService:
                   clinical_context=request.clinical_context,
                   standard_query=standard_query,
                   search_strategy=search_strategy,
-                  need_optimize_query=request.need_optimize_query,
                   top_k=initial_top_k,
                   similarity_threshold=retrieval_config.similarity_threshold,
                   medical_dict=medical_dict
@@ -384,6 +217,7 @@ class RagService:
                   clinical_context=request.clinical_context,
                   strategy=strategy,
                   min_rating=retrieval_config.min_appropriateness_rating or 5,
+                  direct_return=request.direct_return,
                   max_scenarios=retrieval_config.top_scenarios,
                   max_recommendations_per_scenario=retrieval_config.top_recommendations_per_scenario
               )

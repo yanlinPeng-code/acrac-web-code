@@ -179,7 +179,6 @@ class RetrievalService:
         clinical_context: ClinicalContext,
         standard_query:str,
         search_strategy: Optional[SearchStrategy] = None,
-        need_optimize_query:Optional[bool]=False,
         top_k: int = 16,
         similarity_threshold: float = 0.6,  # 相似度阈值
         # reranker_model: Optional[RerankerClientSDK] = None,
@@ -1375,106 +1374,7 @@ class RetrievalService:
         
         return filters
     
-    # async def _vector_semantic_search(
-    #     self,
-    #     patient_info: PatientInfo,
-    #     clinical_context: ClinicalContext,
-    #     embedding_model: Optional[Embedding],
-    #     top_k: int = 30,
-    # ) -> List[Dict[str, Any]]:
-    #     """
-    #     向量语义检索（基于结构化格式）
-    #
-    #     构建查询文本格式：
-    #     主诉: xxx
-    #     既往病史: xxx
-    #     现病史: xxx
-    #     诊断: xxx
-    #     患者人群: xxx
-    #     年龄组: xxx
-    #     性别: xxx
-    #     妊娠状态: xxx
-    #     紧急程度: xxx
-    #     """
-    #     # 构建结构化查询文本（匹配数据库中的embedding格式）
-    #     query_parts = []
-    #
-    #     # 添加临床上下文信息
-    #     if clinical_context.chief_complaint:
-    #         query_parts.append(f"主诉: {clinical_context.chief_complaint}")
-    #
-    #     if clinical_context.medical_history:
-    #         query_parts.append(f"既往病史: {clinical_context.medical_history}")
-    #
-    #     if clinical_context.present_illness:
-    #         query_parts.append(f"现病史: {clinical_context.present_illness}")
-    #
-    #     if clinical_context.diagnosis:
-    #         query_parts.append(f"诊断: {clinical_context.diagnosis}")
-    #
-    #     # 添加患者信息（增强语义匹配）
-    #     if patient_info.age:
-    #         query_parts.append(f"年龄: {patient_info.age}岁")
-    #
-    #     if patient_info.gender:
-    #         query_parts.append(f"性别: {patient_info.gender}")
-    #
-    #     if patient_info.pregnancy_status:
-    #         query_parts.append(f"妊娠状态: {patient_info.pregnancy_status}")
-    #
-    #     if clinical_context.urgency_level:
-    #         query_parts.append(f"紧急程度: {clinical_context.urgency_level}")
-    #
-    #     if clinical_context.symptom_severity:
-    #         query_parts.append(f"症状严重程度: {clinical_context.symptom_severity}")
-    #
-    #     # 用换行符连接，模拟数据库中的embedding格式
-    #     query_text = "\n".join(query_parts)
-    #
-    #     # 使用嵌入模型生成查询向量
-    #     if not embedding_model:
-    #         # 如果没有嵌入模型，使用文本匹配降级方案
-    #         return await self._text_based_search(clinical_context, top_k)
-    #
-    #     try:
-    #         query_embedding = await self._get_embedding(embedding_model, query_text)
-    #     except Exception as e:
-    #         print(f"向量化失败，降级到文本检索: {e}")
-    #         return await self._text_based_search(clinical_context, top_k)
-    #
-    #     # 执行向量相似度检索
-    #     # 使用pgvector的余弦距离函数，需要将Python list转换为vector类型
-    #
-    #     query_vector_str = "[" + ",".join(map(str, query_embedding)) + "]"
-    #
-    #     statement = (
-    #         select(
-    #             ClinicalScenario,
-    #             func.cosine_distance(  # 或者使用 cosine_distance, inner_product
-    #                 ClinicalScenario.embedding,  # 假设字段已定义为vector类型
-    #                 text(f"'{query_vector_str}'")
-    #             ).label('distance')
-    #         )
-    #         .where(ClinicalScenario.is_active == True)
-    #         .order_by(text('distance'))
-    #         .limit(top_k)
-    #     )
-    #
-    #     result = await self.session.exec(statement)
-    #     rows = result.all()
-    #
-    #     # 转换为字典格式，包含相似度分数
-    #     candidates = []
-    #     for scenario, distance in rows:
-    #         # 将距离转换为相似度分数（0-1，越高越相似）
-    #         similarity_score = 1 - distance
-    #         candidates.append({
-    #             'scenario': scenario,
-    #             'vector_similarity': max(0, similarity_score),
-    #             'scenario_id': scenario.semantic_id
-    #         })
-    #
-    #     return candidates
+
     
     def _apply_structured_filter(
         self,
@@ -1561,49 +1461,7 @@ class RetrievalService:
         
         # 默认通过
         return True
-    
-    # async def _text_based_search(
-    #     self,
-    #     clinical_context: ClinicalContext,
-    #     top_k: int = 30
-    # ) -> List[Dict[str, Any]]:
-    #     """
-    #     基于文本的降级检索方案（当向量检索不可用时）
-    #     """
-    #     # 提取关键词
-    #     keywords = self._extract_keywords(clinical_context)
-    #
-    #     # 构建文本匹配条件
-    #     text_conditions = [ClinicalScenario.is_active == True]
-    #
-    #     for keyword in keywords:
-    #         text_conditions.append(
-    #             or_(
-    #                 ClinicalScenario.description_zh.contains(keyword),
-    #                 ClinicalScenario.clinical_context.contains(keyword),
-    #                 ClinicalScenario.symptom_category.contains(keyword)
-    #             )
-    #         )
-    #
-    #     statement = (
-    #         select(ClinicalScenario)
-    #         .where(and_(*text_conditions))
-    #         .limit(top_k)
-    #     )
-    #
-    #     result = await self.session.exec(statement)
-    #     scenarios = result.all()
-    #
-    #     # 返回候选场景（使用默认相似度）
-    #     candidates = []
-    #     for scenario in scenarios:
-    #         candidates.append({
-    #             'scenario': scenario,
-    #             'vector_similarity': 0.5,  # 默认中等相似度
-    #             'scenario_id': scenario.semantic_id
-    #         })
-    #
-    #     return candidates
+
     
     async def _calculate_keyword_scores(
         self,
@@ -1679,46 +1537,7 @@ class RetrievalService:
                 filtered.append(candidate)
         
         return filtered
-    
-    # async def _hybrid_scoring(
-    #     self,
-    #     candidates: List[Dict[str, Any]],
-    #     keyword_scores: Dict[str, float],
-    #     search_strategy: SearchStrategy
-    # ) -> List[Dict[str, Any]]:
-    #     """
-    #     混合打分：结合向量相似度、关键词匹配、规则匹配
-    #
-    #     加权公式：
-    #     final_score = vector_weight * vector_sim + keyword_weight * keyword_score + rule_weight * rule_score
-    #     """
-    #     scored = []
-    #
-    #     for candidate in candidates:
-    #         scenario_id = candidate['scenario_id']
-    #         vector_sim = candidate.get('vector_similarity', 0)
-    #         keyword_score = keyword_scores.get(scenario_id, 0)
-    #
-    #         # 规则分数（可以基于场景的其他属性计算）
-    #         rule_score = self._calculate_rule_score(candidate['scenario'])
-    #
-    #         # 加权融合
-    #         final_score = (
-    #             search_strategy.vector_weight * vector_sim +
-    #             search_strategy.keyword_weight * keyword_score +
-    #             search_strategy.rule_weight * rule_score
-    #         )
-    #
-    #         candidate['keyword_score'] = keyword_score
-    #         candidate['rule_score'] = rule_score
-    #         candidate['final_score'] = final_score
-    #
-    #         scored.append(candidate)
-    #
-    #     # 按最终分数降序排序
-    #     scored.sort(key=lambda x: x['final_score'], reverse=True)
-    #
-    #     return scored
+
     
     def _calculate_rule_score(self, scenario: ClinicalScenario) -> float:
         """
@@ -3732,6 +3551,7 @@ class RetrievalService:
             clinical_context: ClinicalContext,
             strategy: RerankingStrategy,
             min_rating: int = 5,
+            direct_return:bool=False,
             max_scenarios: int = 3,
             max_recommendations_per_scenario: int = 2
     ) -> List[Dict[str, Any]]:
@@ -3745,41 +3565,41 @@ class RetrievalService:
         try:
             # 根据策略执行不同的处理逻辑
             if strategy == RerankingStrategy.NONE:
-                return await self._handle_none_strategy(all_scenarios, max_scenarios)
+                return await self._handle_none_strategy(all_scenarios, max_scenarios,direct_return)
             elif strategy == RerankingStrategy.RULE_ONLY:
                 return await self._handle_rule_only_strategy(
                     all_scenarios, patient_info, clinical_context,
-                    min_rating, max_scenarios, max_recommendations_per_scenario
+                    min_rating,direct_return, max_scenarios, max_recommendations_per_scenario
                 )
             elif strategy == RerankingStrategy.LLM_SCENARIO_ONLY:
                 return await self._handle_llm_scenario_only_strategy(
                     all_scenarios, patient_info, clinical_context,
-                    min_rating, max_scenarios, max_recommendations_per_scenario
+                    min_rating,direct_return, max_scenarios, max_recommendations_per_scenario
                 )
             elif strategy == RerankingStrategy.LLM_RECOMMENDATION_ONLY:
                 return await self._handle_llm_recommendation_only_strategy(
                     all_scenarios, patient_info, clinical_context,
-                    min_rating, max_scenarios, max_recommendations_per_scenario
+                    min_rating,direct_return, max_scenarios, max_recommendations_per_scenario
                 )
             elif strategy == RerankingStrategy.RULE_AND_LLM_SCENARIO:
                 return await self._handle_rule_and_llm_scenario_strategy(
                     all_scenarios, patient_info, clinical_context,
-                    min_rating, max_scenarios, max_recommendations_per_scenario
+                    min_rating,direct_return, max_scenarios, max_recommendations_per_scenario
                 )
             elif strategy == RerankingStrategy.RULE_AND_LLM_RECOMMENDATION:
                 return await self._handle_rule_and_llm_recommendation_strategy(
                     all_scenarios, patient_info, clinical_context,
-                    min_rating, max_scenarios, max_recommendations_per_scenario
+                    min_rating,direct_return, max_scenarios, max_recommendations_per_scenario
                 )
             elif strategy == RerankingStrategy.LLM_SCENARIO_AND_RECOMMENDATION:
                 return await self._handle_llm_scenario_and_recommendation_strategy(
                     all_scenarios, patient_info, clinical_context,
-                    min_rating, max_scenarios, max_recommendations_per_scenario
+                    min_rating,direct_return, max_scenarios, max_recommendations_per_scenario
                 )
             elif strategy == RerankingStrategy.ALL:
                 return await self._handle_all_strategy(
                     all_scenarios, patient_info, clinical_context,
-                    min_rating, max_scenarios, max_recommendations_per_scenario
+                    min_rating,direct_return, max_scenarios, max_recommendations_per_scenario
                 )
             else:
                 logger.warning(f"未知策略: {strategy}，使用默认处理")
@@ -3791,13 +3611,13 @@ class RetrievalService:
 
     # ========== 八种策略的具体实现 ==========
 
-    async def _handle_none_strategy(self, all_scenarios, max_scenarios):
+    async def _handle_none_strategy(self, all_scenarios, max_scenarios,direct_return):
         """策略1: 无重排序，直接返回"""
         logger.info(f"策略1-NONE: 直接返回前{max_scenarios}个场景")
         return all_scenarios[:max_scenarios]
 
     async def _handle_rule_only_strategy(self, all_scenarios, patient_info, clinical_context,
-                                         min_rating, max_scenarios, max_recommendations_per_scenario):
+                                         min_rating,direct_return, max_scenarios, max_recommendations_per_scenario):
         """策略2: 仅规则重排序"""
         logger.info(f"策略2-RULE_ONLY: 规则重排序{max_scenarios}个场景")
 
@@ -3826,7 +3646,7 @@ class RetrievalService:
         return assemble_database_results( rule_ranked_scenarios,patient_info, clinical_context, max_scenarios, max_recommendations_per_scenario)
 
     async def _handle_llm_scenario_only_strategy(self, all_scenarios, patient_info, clinical_context,
-                                                 min_rating, max_scenarios, max_recommendations_per_scenario):
+                                                 min_rating, direct_return,max_scenarios, max_recommendations_per_scenario):
         """策略3: 仅LLM场景重排序"""
         logger.info(f"策略3-LLM_SCENARIO_ONLY: LLM重排序{max_scenarios}个场景")
 
@@ -3876,7 +3696,7 @@ class RetrievalService:
         """从患者ID生成种子"""
         return hash(patient_id) % 10000
     async def _handle_llm_recommendation_only_strategy(self, all_scenarios, patient_info, clinical_context,
-                                                       min_rating, max_scenarios, max_recommendations_per_scenario):
+                                                       min_rating,direct_return, max_scenarios, max_recommendations_per_scenario):
         """策略4: 仅LLM推荐项目重排序"""
         logger.info(f"策略4-LLM_RECOMMENDATION_ONLY: 对前{max_scenarios}个场景进行LLM推荐项目重排序")
 
@@ -3897,13 +3717,13 @@ class RetrievalService:
         # 使用自适应引擎进行LLM推荐项目重排序
         recommendations = await self.adaptive_recommendation_engine_service.get_recommendations(
             final_scenario_with_recommendations, patient_info, clinical_context,
-            max_recommendations_per_scenario, use_adaptive=True
+            max_recommendations_per_scenario, direct_return,use_adaptive=True
         )
 
         return recommendations
 
     async def _handle_rule_and_llm_scenario_strategy(self, all_scenarios, patient_info, clinical_context,
-                                                     min_rating, max_scenarios, max_recommendations_per_scenario):
+                                                     min_rating,direct_return, max_scenarios, max_recommendations_per_scenario):
         """策略5: 规则+LLM场景重排序"""
         logger.info(f"策略5-RULE_AND_LLM_SCENARIO: 规则重排序后LLM重排序{max_scenarios}个场景")
 
@@ -3939,7 +3759,7 @@ class RetrievalService:
                                          max_scenarios, max_recommendations_per_scenario)
 
     async def _handle_rule_and_llm_recommendation_strategy(self, all_scenarios, patient_info, clinical_context,
-                                                           min_rating, max_scenarios, max_recommendations_per_scenario):
+                                                           min_rating,direct_return, max_scenarios, max_recommendations_per_scenario):
         """策略6: 规则+LLM推荐项目重排序"""
         logger.info(f"策略6-RULE_AND_LLM_RECOMMENDATION: 规则重排序后LLM推荐项目重排序")
 
@@ -3965,13 +3785,13 @@ class RetrievalService:
         # 第二步：LLM推荐项目重排序
         recommendations = await self.adaptive_recommendation_engine_service.get_recommendations(
             rule_ranked_scenarios, patient_info, clinical_context,
-            max_recommendations_per_scenario, use_adaptive=True
+            max_recommendations_per_scenario,direct_return, use_adaptive=True
         )
 
         return recommendations
 
     async def _handle_llm_scenario_and_recommendation_strategy(self, all_scenarios, patient_info, clinical_context,
-                                                               min_rating, max_scenarios,
+                                                               min_rating,direct_return, max_scenarios,
                                                                max_recommendations_per_scenario):
         """策略7: LLM场景+推荐项目重排序"""
         logger.info(f"策略7-LLM_SCENARIO_AND_RECOMMENDATION: LLM场景重排序+推荐项目重排序")
@@ -4018,13 +3838,13 @@ class RetrievalService:
             # 第二步：LLM推荐项目重排序
             recommendations = await self.adaptive_recommendation_engine_service.get_recommendations(
                 filtered_scenarios_with_recommends, patient_info, clinical_context,
-                max_recommendations_per_scenario, use_adaptive=True
+                max_recommendations_per_scenario,direct_return, use_adaptive=True
             )
 
             return recommendations
 
     async def _handle_all_strategy(self, all_scenarios, patient_info, clinical_context,
-                                   min_rating, max_scenarios, max_recommendations_per_scenario):
+                                   min_rating, direct_return,max_scenarios, max_recommendations_per_scenario):
         """策略8: 全部启用 - 规则重排序 + LLM场景重排序 + LLM推荐项目重排序"""
         logger.info(f"策略8-ALL: 规则重排序 + LLM场景重排序 + LLM推荐项目重排序")
 
@@ -4044,45 +3864,15 @@ class RetrievalService:
             top_k=max_scenarios,
             enable_llm=True
         )
-
-        # 构建提示词并检查token数量
-        # prompt = self._build_comprehensive_prompt_with_grading(
-        #     final_scenario_with_recommendations, patient_info, clinical_context,
-        #     max_scenarios, max_recommendations_per_scenario
-        # )
-        #
-        # token_nums = self.adaptive_recommendation_engine_service.estimate_tokens_with_tiktoken(prompt)
-        # threshold = self.adaptive_recommendation_engine_service.strategy.threshold_config["token_threshold"]
-
-        # if token_nums < threshold:
-        #     logger.info(f"Token数量({token_nums})小于阈值({threshold})，使用单次LLM调用")
-        #     # 单次LLM调用同时处理场景选择和推荐项目分级
-        #     return await self._llm_recommend_scenarios(
-        #         final_scenario_with_recommendations, prompt, patient_info,
-        #         max_scenarios, max_recommendations_per_scenario
-        #     )
-        # else:
-        # logger.info(f"Token数量({token_nums})超过阈值({threshold})，分开处理场景选择和推荐项目")
-            # 分开处理：先LLM场景重排序，再LLM推荐项目重排序
-            # 第一步：LLM场景重排序
-            # llm_ranked_scenarios = await self.llm_rank_scenarios(
-            #     filter_scenario_with_recommendations, patient_info, clinical_context, max_scenarios
-            # )
-            #
-            # # 筛选出对应的推荐数据
-            # scenarios_id_set = {scenario["scenario_id"] for scenario in llm_ranked_scenarios}
-            # filtered_scenarios_with_recommends = [
-            #     scenario_rec for scenario_rec in filter_scenario_with_recommendations
-            #     if scenario_rec["scenario_id"] in scenarios_id_set
-            # ]
-
-            # 第二步：LLM推荐项目重排序
+        #如果是直接返回json数据
+        # 第二步：LLM推荐项目重排序
         recommendations = await self.adaptive_recommendation_engine_service.get_recommendations(
-                ranked_scenarios, patient_info, clinical_context,
-                max_recommendations_per_scenario, use_adaptive=True
-        )
+                    ranked_scenarios, patient_info, clinical_context,
+                    max_recommendations_per_scenario, direct_return, use_adaptive=True
+            )
 
         return recommendations
+        #如果是直接让llm返回推荐
 
 
 

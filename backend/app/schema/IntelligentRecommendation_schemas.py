@@ -57,8 +57,6 @@ class RetrievalRequest(BaseModel):
     apply_rule_filter: Optional[bool] = Field(True, description="是否应用规则过滤")
     top_scenarios: Optional[int] = Field(10, description="返回的场景数量", ge=1, le=50)
     top_recommendations_per_scenario: Optional[int] = Field(5, description="每个场景的推荐数量", ge=1, le=20)
-    show_reasoning: Optional[bool] = Field(True, description="是否显示推荐理由")
-    include_raw_data: Optional[bool] = Field(False, description="是否包含原始数据")
     similarity_threshold: Optional[float] = Field(0.6, description="相似度阈值", ge=0.1, le=0.9)
     min_appropriateness_rating: Optional[int] = Field(None, description="最低适宜性评分", ge=1, le=9)
 
@@ -98,9 +96,9 @@ class IntelligentRecommendationRequest(BaseModel):
     """智能推荐请求模型"""
     patient_info: Optional[PatientInfo] = Field(..., description="患者基本信息")
     clinical_context: Optional[ClinicalContext] = Field(..., description="临床上下文信息")
-    need_optimize_query:Optional[bool]=Field(...,description="是否要优化问题")
     search_strategy: Optional[SearchStrategy] = Field(None, description="检索权重配置")
     retrieval_strategy: Optional[RetrievalRequest] = Field(None, description="检索的策略配置")
+    direct_return:Optional[bool]=Field(False,description="是否直接返回json检索结果")
     standard_query:Optional[str]=Field("",description="标准问题，该问题主要用于测试")
 
     @property

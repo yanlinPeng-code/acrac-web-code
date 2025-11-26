@@ -13,7 +13,7 @@ from app.utils.jieba_middleware import jiebaLoader
 from app.utils.logger.simple_logger import setup_logging
 from app.utils.logger.simple_logger import get_logger
 from app.service.rag_v1.ai_service import AiService
-
+from app.controller.eval_v1 import evl_router,judge_router
 # 创建日志记录器
 logger = get_logger(__name__)
 
@@ -77,6 +77,8 @@ async def register_router(app:FastAPI):
 
     logger.info("正在注册路由")
     app.include_router(recommend_router)
+    app.include_router(evl_router)
+    app.include_router(judge_router)
     logger.info("注册路由完成")
 
 

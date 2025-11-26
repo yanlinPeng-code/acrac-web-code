@@ -1,0 +1,19 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+backend/.venv
+backend/origin_data
+backend/test_scripts
+backend/dict
+backend/.idea
+.env
+uv.lock
+
+frontend/eval-app/node_modules
+frontend/eval-app/dist

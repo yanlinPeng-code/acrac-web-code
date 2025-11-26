@@ -1,0 +1,60 @@
+version: '3.8'
+
+services:
+  # 后端服务
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: acrac-backend
+    restart: always
+    ports:
+      - "8000:8000"
+    volumes:
+      # 挂载日志目录
+      - ./backend/logs:/app/logs
+      # 挂载评测结果目录
+      - ./backend/evaluation_results:/app/evaluation_results
+      # 挂载字典数据
+      - ./backend/dict:/app/dict
+      # 挂载原始数据
+      - ./backend/origin_data:/app/origin_data
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TZ=Asia/Shanghai
+    networks:
+      - acrac-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # 前端服务
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/eval-app/Dockerfile
+    container_name: acrac-frontend
+    restart: always
+    ports:
+      - "5188:80"
+    depends_on:
+      - backend
+    networks:
+      - acrac-network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:80"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+networks:
+  acrac-network:
+    driver: bridge
+
+volumes:
+  backend-logs:
+  evaluation-results:

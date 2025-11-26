@@ -1,209 +1,484 @@
-import { useMemo, useRef, useState } from "react"
-import { Upload, Radio, Button, Card, Table, Typography, message, Input, Switch, InputNumber } from "antd"
+/**
+ * 推荐系统评测平台 - 主应用组件
+ */
+
+import { useState, useRef } from "react"
+import { Layout, Menu, Upload, Radio, Button, Card, Typography, message, Spin, Divider, Badge } from "antd"
 import type { UploadFile } from "antd"
+import {
+  FileTextOutlined,
+  RocketOutlined,
+  SettingOutlined,
+  BarChartOutlined,
+  ThunderboltOutlined,
+} from "@ant-design/icons"
 
-type Detail = {
-  clinical_scenario: string
-  standard_answer: string
-  recommendations: any
-  hit: boolean
-  processing_time_ms: number
-}
+// 类型定义
+import type { EvalMode, EndpointType, SingleEvaluationData, AllEvaluationData } from "./types/evaluation"
 
-type EvalResponse = {
-  RequestId: string
-  Data: {
-    overall_accuracy: number
-    combination_a: {
-      accuracy: number
-      total_samples: number
-      hit_samples: number
-      details: Detail[]
-    }
-    combination_b: {
-      accuracy: number
-      total_samples: number
-      hit_samples: number
-      details: Detail[]
-    }
-    average_processing_time_ms: number
-    total_samples: number
-  }
-}
+// API请求
+import { evaluateSingleEndpoint, evaluateAllEndpoints } from "./api/evaluation"
+import { ENDPOINTS } from "./api/config"
+
+// 工具函数
+import { generateRandomId } from "./utils/format"
+
+// UI组件
+import EvaluationParams from "./components/EvaluationParams"
+import SingleEvalResult from "./components/SingleEvalResult"
+import AllEvalResult from "./components/AllEvalResult"
+
+const { Header, Sider, Content } = Layout
+const { Title, Text } = Typography
 
 export default function App() {
   // 基本设置
-  const [selectedEndpoint, setSelectedEndpoint] = useState<"recommend" | "recommend-simple">("recommend")
-  const [uploadedFiles, setUploadedFiles] = useState<UploadFile[]>([])
-  const [backendUrl, setBackendUrl] = useState<string>("http://localhost:8000")
+  const [evalMode, setEvalMode] = useState<EvalMode>("single")
+  const [selectedEndpoint, setSelectedEndpoint] = useState<EndpointType>("recommend-simple")
 
-  // 策略参数
-  const [enableReranking, setEnableReranking] = useState<boolean>(true)
-  const [needLLMRecommendations, setNeedLLMRecommendations] = useState<boolean>(true)
-  const [applyRuleFilter, setApplyRuleFilter] = useState<boolean>(true)
-  const [similarityThreshold, setSimilarityThreshold] = useState<number>(0.6)
+  // 分别管理两种模式的文件
+  const [singleModeFiles, setSingleModeFiles] = useState<UploadFile[]>([])
+  const [allModeFiles, setAllModeFiles] = useState<UploadFile[]>([])
+
+  // 非文件模式参数
+  const [standardQuery, setStandardQuery] = useState<string>("")
+  const [patientInfo, setPatientInfo] = useState<string>("")
+  const [clinicalContext, setClinicalContext] = useState<string>("")
+  const [goldAnswer, setGoldAnswer] = useState<string>("")
+
+  // 核心参数
+  const [topScenarios, setTopScenarios] = useState<number>(3)
+  const [topRecommendationsPerScenario, setTopRecommendationsPerScenario] = useState<number>(3)
+  const [similarityThreshold, setSimilarityThreshold] = useState<number>(0.7)
   const [minAppropriatenessRating, setMinAppropriatenessRating] = useState<number>(5)
-  const [variantTopScenarios, setVariantTopScenarios] = useState<number | undefined>(undefined)
-  const [variantTopRecommendations, setVariantTopRecommendations] = useState<number | undefined>(undefined)
+
+  // recommend/recommend-simple 特有参数
+  const [enableReranking, setEnableReranking] = useState<boolean>(false)
+  const [needLLMRecommendations, setNeedLLMRecommendations] = useState<boolean>(false)
+  const [applyRuleFilter, setApplyRuleFilter] = useState<boolean>(false)
+
+  // intelligent-recommendation 特有参数
+  const [showReasoning, setShowReasoning] = useState<boolean>(false)
+  const [includeRawData, setIncludeRawData] = useState<boolean>(false)
+  const [debugMode, setDebugMode] = useState<boolean>(false)
+  const [computeRagas, setComputeRagas] = useState<boolean>(false)
+  const [groundTruth, setGroundTruth] = useState<string>("")
+
+  // recommend_item_with_reason 特有参数
+  const [sessionId] = useState<string>(generateRandomId())
+  const [patientId] = useState<string>(generateRandomId())
+  const [doctorId] = useState<string>(generateRandomId())
 
   // 运行状态
   const [loading, setLoading] = useState(false)
-  const [evaluationResult, setEvaluationResult] = useState<EvalResponse["Data"] | null>(null)
+  const [evaluationResult, setEvaluationResult] = useState<SingleEvaluationData | null>(null)
+  const [allEvaluationResult, setAllEvaluationResult] = useState<AllEvaluationData | null>(null)
   const startTs = useRef<number>(0)
   const [clientLatencyMillis, setClientLatencyMillis] = useState<number | null>(null)
 
-  // 明细表列定义
-  const DETAIL_COLUMNS = useMemo(
-    () => [
-      { title: "临床场景", dataIndex: "clinical_scenario" },
-      { title: "标准答案", dataIndex: "standard_answer" },
-      {
-        title: "推荐",
-        dataIndex: "recommendations",
-        render: (v: any) => {
-          if (Array.isArray(v)) {
-            return Array.isArray(v[0]) ? v.map((g: any, i: number) => (<div key={i}>{g.join("，")}</div>)) : v.join("，")
-          }
-          return String(v)
-        },
-      },
-      { title: "逐场景命中", dataIndex: "per_scenario_hits", render: (v: number[]) => (Array.isArray(v) ? v.join(" / ") : "-") },
-      { title: "命中", dataIndex: "hit", render: (v: boolean) => (v ? "是" : "否") },
-      { title: "服务端耗时(ms)", dataIndex: "processing_time_ms" },
-    ],
-    []
-  )
+  // 侧边栏选中项
+  const [selectedMenu, setSelectedMenu] = useState<string>("config")
 
-  // 组合对比表列定义
-  const VARIANT_COLUMNS = useMemo(
-    () => [
-      { title: "组合", dataIndex: "label" },
-      { title: "命中率", dataIndex: "accuracy", render: (v: number) => `${(v*100).toFixed(2)}%` },
-      { title: "样本数", dataIndex: "total_samples" },
-      { title: "命中样本", dataIndex: "hit_samples" },
-    ],
-    []
-  )
+  // 获取当前模式的文件
+  const currentFiles = evalMode === "single" ? singleModeFiles : allModeFiles
+  const setCurrentFiles = evalMode === "single" ? setSingleModeFiles : setAllModeFiles
 
-  // 执行评测：组装表单，提交到后端评测路由，并记录端到端耗时
-  async function runEvaluate() {
-    if (!selectedEndpoint) return
+  /**
+   * 执行单个接口评测
+   */
+  const runSingleEvaluate = async () => {
+    if (singleModeFiles.length === 0) {
+      message.error("请上传Excel文件")
+      return
+    }
+
+    const file = singleModeFiles[0].originFileObj as File
+    if (!file) {
+      message.error("文件无效")
+      return
+    }
+
     setLoading(true)
     setEvaluationResult(null)
+    setAllEvaluationResult(null)
     setClientLatencyMillis(null)
     startTs.current = Date.now()
+
     try {
-      const form = new FormData()
-      form.append("server_url", backendUrl)
-      form.append("endpoint", selectedEndpoint)
-      form.append("enable_reranking", String(enableReranking))
-      form.append("need_llm_recommendations", String(needLLMRecommendations))
-      form.append("apply_rule_filter", String(applyRuleFilter))
-      form.append("similarity_threshold", String(similarityThreshold))
-      form.append("min_appropriateness_rating", String(minAppropriatenessRating))
-      if (typeof variantTopScenarios === "number") form.append("top_scenarios", String(variantTopScenarios))
-      if (typeof variantTopRecommendations === "number") form.append("top_recommendations_per_scenario", String(variantTopRecommendations))
-      if (uploadedFiles[0]) {
-        const f = uploadedFiles[0]
-        if (f.originFileObj) form.append("file", f.originFileObj as File)
+      const params: any = {
+        file,
+        endpoint: selectedEndpoint,
+        top_scenarios: topScenarios,
+        top_recommendations_per_scenario: topRecommendationsPerScenario,
+        similarity_threshold: similarityThreshold,
+        min_appropriateness_rating: minAppropriatenessRating,
       }
-      const resp = await fetch("/api/v1/evaluate-recommend", { method: "POST", body: form })
-      const json = await resp.json()
+
+      // 根据endpoint添加特有参数
+      if (selectedEndpoint === ENDPOINTS.RECOMMEND || selectedEndpoint === ENDPOINTS.RECOMMEND_SIMPLE) {
+        params.enable_reranking = enableReranking
+        params.need_llm_recommendations = needLLMRecommendations
+        params.apply_rule_filter = applyRuleFilter
+      }
+
+      if (selectedEndpoint === ENDPOINTS.INTELLIGENT_RECOMMENDATION) {
+        params.show_reasoning = showReasoning
+        params.include_raw_data = includeRawData
+        params.debug_mode = debugMode
+        params.compute_ragas = computeRagas
+        if (groundTruth) params.ground_truth = groundTruth
+      }
+
+      if (selectedEndpoint === ENDPOINTS.RECOMMEND_ITEM_WITH_REASON) {
+        params.session_id = sessionId
+        params.patient_id = patientId
+        params.doctor_id = doctorId
+      }
+
+      const response = await evaluateSingleEndpoint(params)
       setClientLatencyMillis(Date.now() - startTs.current)
-      if (!json?.Data) throw new Error("无Data")
-      setEvaluationResult(json.Data)
-      message.success("评测完成")
+      setEvaluationResult(response.Data)
+      message.success("评测完成！")
+      // 自动跳转到结果页
+      setSelectedMenu("result")
     } catch (e: any) {
       setClientLatencyMillis(Date.now() - startTs.current)
       message.error(e?.message || "评测失败")
+      console.error(e)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  /**
+   * 执行所有接口并发评测
+   */
+  const runAllEvaluate = async () => {
+    if (allModeFiles.length === 0) {
+      message.error("请上传Excel文件")
+      return
+    }
+
+    const file = allModeFiles[0].originFileObj as File
+    if (!file) {
+      message.error("文件无效")
+      return
+    }
+
+    setLoading(true)
+    setEvaluationResult(null)
+    setAllEvaluationResult(null)
+    setClientLatencyMillis(null)
+    startTs.current = Date.now()
+
+    try {
+      const params = {
+        file,
+        top_scenarios: topScenarios,
+        top_recommendations_per_scenario: topRecommendationsPerScenario,
+        similarity_threshold: similarityThreshold,
+        min_appropriateness_rating: minAppropriatenessRating,
+      }
+
+      const response = await evaluateAllEndpoints(params)
+      setClientLatencyMillis(Date.now() - startTs.current)
+      setAllEvaluationResult(response.Data)
+      message.success("所有接口评测完成！")
+      // 自动跳转到结果页
+      setSelectedMenu("result")
+    } catch (e: any) {
+      setClientLatencyMillis(Date.now() - startTs.current)
+      message.error(e?.message || "评测失败")
+      console.error(e)
     } finally {
       setLoading(false)
     }
   }
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      <div className="max-w-6xl mx-auto p-6 space-y-6">
-        <Typography.Title level={3}>推荐系统评测</Typography.Title>
+    <Layout style={{ minHeight: "100vh" }}>
+      {/* 顶部导航栏 */}
+      <Header style={{ background: "#001529", padding: "0 24px", display: "flex", alignItems: "center" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+          <RocketOutlined style={{ fontSize: 28, color: "#1890ff" }} />
+          <Title level={3} style={{ margin: 0, color: "white" }}>
+            推荐系统评测平台
+          </Title>
+        </div>
+      </Header>
 
-        <Card>
-          <div className="flex flex-col md:flex-row gap-4 items-center">
-            <Input style={{ maxWidth: 320 }} value={backendUrl} onChange={(e) => setBackendUrl(e.target.value)} placeholder="服务端URL，如 http://localhost:8000" />
-            <Upload
-              fileList={uploadedFiles}
-              beforeUpload={() => false}
-              onChange={(info) => setUploadedFiles(info.fileList.slice(0, 1))}
-            >
-              <Button>上传Excel</Button>
-            </Upload>
-            <Radio.Group
-              value={selectedEndpoint}
-              onChange={(e) => setSelectedEndpoint(e.target.value)}
-              options={[{ label: "recommend", value: "recommend" }, { label: "recommend-simple", value: "recommend-simple" }]}
-              optionType="button"
-            />
-            <Button type="primary" loading={loading} onClick={runEvaluate}>
-              开始评测
-            </Button>
+      <Layout>
+        {/* 左侧边栏 */}
+        <Sider width={240} style={{ background: "#fff" }}>
+          <div style={{ padding: "16px" }}>
+            <Badge.Ribbon text={evalMode === "single" ? "单接口" : "并发"} color={evalMode === "single" ? "blue" : "green"}>
+              <Card size="small">
+                <Text strong>评测模式</Text>
+                <Radio.Group
+                  value={evalMode}
+                  onChange={(e) => {
+                    setEvalMode(e.target.value)
+                    setEvaluationResult(null)
+                    setAllEvaluationResult(null)
+                    setSelectedMenu("config")
+                  }}
+                  style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 8 }}
+                >
+                  <Radio value="single">单个接口评测</Radio>
+                  <Radio value="all">所有接口并发评测</Radio>
+                </Radio.Group>
+              </Card>
+            </Badge.Ribbon>
           </div>
-        </Card>
 
-        <Card title="评测参数（可选）">
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div className="flex items-center gap-2"><span>启用LLM重排序场景</span><Switch checked={enableReranking} onChange={setEnableReranking} /></div>
-            <div className="flex items-center gap-2"><span>启动LLM推荐</span><Switch checked={needLLMRecommendations} onChange={setNeedLLMRecommendations} /></div>
-            <div className="flex items-center gap-2"><span>启用规则过滤</span><Switch checked={applyRuleFilter} onChange={setApplyRuleFilter} /></div>
-            <div className="flex items-center gap-2"><span>相似度阈值</span><InputNumber min={0.1} max={0.9} step={0.05} value={similarityThreshold} onChange={(v) => setSimilarityThreshold(Number(v))} /></div>
-            <div className="flex items-center gap-2"><span>最低适宜性评分</span><InputNumber min={1} max={9} step={1} value={minAppropriatenessRating} onChange={(v) => setMinAppropriatenessRating(Number(v))} /></div>
-            <div className="flex items-center gap-2"><span>场景数 top_s</span><InputNumber min={1} max={50} step={1} value={variantTopScenarios} onChange={(v) => setVariantTopScenarios(typeof v === "number" ? v : undefined)} /></div>
-            <div className="flex items-center gap-2"><span>每场景推荐数 top_r</span><InputNumber min={1} max={20} step={1} value={variantTopRecommendations} onChange={(v) => setVariantTopRecommendations(typeof v === "number" ? v : undefined)} /></div>
-          </div>
-        </Card>
+          <Divider style={{ margin: "8px 0" }} />
 
-        {evaluationResult && (
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <Card title="总体">
-              <div>端到端耗时：{clientLatencyMillis ?? 0} ms</div>
-              <div>服务端平均耗时：{evaluationResult.average_processing_time_ms} ms</div>
-              <div>总体命中率：{(evaluationResult.overall_accuracy * 100).toFixed(2)}%</div>
-              <div>样本数：{evaluationResult.total_samples}</div>
-            </Card>
-            <Card title="组合A(1场景/1推荐)">
-              <div>命中率：{(evaluationResult.combination_a.accuracy * 100).toFixed(2)}%</div>
-              <div>样本数：{evaluationResult.combination_a.total_samples}</div>
-              <div>命中样本：{evaluationResult.combination_a.hit_samples}</div>
-            </Card>
-            <Card title="组合B(3场景/3推荐)">
-              <div>命中率：{(evaluationResult.combination_b.accuracy * 100).toFixed(2)}%</div>
-              <div>样本数：{evaluationResult.combination_b.total_samples}</div>
-              <div>命中样本：{evaluationResult.combination_b.hit_samples}</div>
-            </Card>
-          </div>
-        )}
+          <Menu
+            mode="inline"
+            selectedKeys={[selectedMenu]}
+            onClick={(e) => setSelectedMenu(e.key)}
+            items={[
+              {
+                key: "config",
+                icon: <SettingOutlined />,
+                label: "配置评测",
+              },
+              {
+                key: "result",
+                icon: <BarChartOutlined />,
+                label: "评测结果",
+                disabled: !evaluationResult && !allEvaluationResult,
+              },
+            ]}
+          />
+        </Sider>
 
-        {evaluationResult && (
-          <Card title="组合A明细">
-            <Table rowKey={(r) => r.clinical_scenario + "A"} columns={DETAIL_COLUMNS} dataSource={evaluationResult.combination_a.details} pagination={false} />
+        {/* 主内容区 */}
+        <Content style={{ padding: "24px", background: "#f0f2f5", minHeight: "calc(100vh - 64px)" }}>
+          {selectedMenu === "config" && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
+              {/* 文件上传 */}
+              <Card
+                title={
+                  <span>
+                    <FileTextOutlined /> 上传评测数据
+                  </span>
+                }
+                extra={
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    支持 .xlsx 格式
+                  </Text>
+                }
+              >
+                <Upload
+                  fileList={currentFiles}
+                  beforeUpload={() => false}
+                  onChange={(info) => setCurrentFiles(info.fileList.slice(0, 1))}
+                  maxCount={1}
+                  accept=".xlsx,.xls"
+                >
+                  <Button icon={<FileTextOutlined />} size="large">
+                    选择Excel文件
+                  </Button>
+                </Upload>
+                {currentFiles.length > 0 && (
+                  <div style={{ marginTop: 12 }}>
+                    <Text type="success">
+                      ✓ 已选择文件: {currentFiles[0].name}
+                    </Text>
+                  </div>
+                )}
+              </Card>
+
+              {/* 接口选择 */}
+              {evalMode === "single" && (
+                <Card
+                  title={
+                    <span>
+                      <ThunderboltOutlined /> 选择评测接口
+                    </span>
+                  }
+                >
+                  <Radio.Group
+                    value={selectedEndpoint}
+                    onChange={(e) => setSelectedEndpoint(e.target.value)}
+                    style={{ width: "100%" }}
+                  >
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 12 }}>
+                      <Card
+                        size="small"
+                        hoverable
+                        style={{
+                          border: selectedEndpoint === ENDPOINTS.RECOMMEND ? "2px solid #1890ff" : "1px solid #d9d9d9",
+                        }}
+                        onClick={() => setSelectedEndpoint(ENDPOINTS.RECOMMEND)}
+                      >
+                        <Radio value={ENDPOINTS.RECOMMEND}>Recommend</Radio>
+                        <div style={{ marginTop: 4, fontSize: 12, color: "#666" }}>标准推荐接口</div>
+                      </Card>
+
+                      <Card
+                        size="small"
+                        hoverable
+                        style={{
+                          border:
+                            selectedEndpoint === ENDPOINTS.RECOMMEND_SIMPLE ? "2px solid #1890ff" : "1px solid #d9d9d9",
+                        }}
+                        onClick={() => setSelectedEndpoint(ENDPOINTS.RECOMMEND_SIMPLE)}
+                      >
+                        <Radio value={ENDPOINTS.RECOMMEND_SIMPLE}>Recommend Simple</Radio>
+                        <div style={{ marginTop: 4, fontSize: 12, color: "#666" }}>简化推荐接口</div>
+                      </Card>
+
+                      <Card
+                        size="small"
+                        hoverable
+                        style={{
+                          border:
+                            selectedEndpoint === ENDPOINTS.INTELLIGENT_RECOMMENDATION
+                              ? "2px solid #1890ff"
+                              : "1px solid #d9d9d9",
+                        }}
+                        onClick={() => setSelectedEndpoint(ENDPOINTS.INTELLIGENT_RECOMMENDATION)}
+                      >
+                        <Radio value={ENDPOINTS.INTELLIGENT_RECOMMENDATION}>Intelligent Recommendation</Radio>
+                        <div style={{ marginTop: 4, fontSize: 12, color: "#666" }}>智能推荐接口</div>
+                      </Card>
+
+                      <Card
+                        size="small"
+                        hoverable
+                        style={{
+                          border:
+                            selectedEndpoint === ENDPOINTS.RECOMMEND_ITEM_WITH_REASON
+                              ? "2px solid #1890ff"
+                              : "1px solid #d9d9d9",
+                        }}
+                        onClick={() => setSelectedEndpoint(ENDPOINTS.RECOMMEND_ITEM_WITH_REASON)}
+                      >
+                        <Radio value={ENDPOINTS.RECOMMEND_ITEM_WITH_REASON}>Recommend With Reason</Radio>
+                        <div style={{ marginTop: 4, fontSize: 12, color: "#666" }}>带理由推荐</div>
+                      </Card>
+                    </div>
+                  </Radio.Group>
+                </Card>
+              )}
+
+              {/* 评测参数 */}
+              <EvaluationParams
+                endpoint={selectedEndpoint}
+                hasFile={currentFiles.length > 0}
+                standardQuery={standardQuery}
+                setStandardQuery={setStandardQuery}
+                patientInfo={patientInfo}
+                setPatientInfo={setPatientInfo}
+                clinicalContext={clinicalContext}
+                setClinicalContext={setClinicalContext}
+                goldAnswer={goldAnswer}
+                setGoldAnswer={setGoldAnswer}
+                topScenarios={topScenarios}
+                setTopScenarios={setTopScenarios}
+                topRecommendationsPerScenario={topRecommendationsPerScenario}
+                setTopRecommendationsPerScenario={setTopRecommendationsPerScenario}
+                similarityThreshold={similarityThreshold}
+                setSimilarityThreshold={setSimilarityThreshold}
+                minAppropriatenessRating={minAppropriatenessRating}
+                setMinAppropriatenessRating={setMinAppropriatenessRating}
+                enableReranking={enableReranking}
+                setEnableReranking={setEnableReranking}
+                needLLMRecommendations={needLLMRecommendations}
+                setNeedLLMRecommendations={setNeedLLMRecommendations}
+                applyRuleFilter={applyRuleFilter}
+                setApplyRuleFilter={setApplyRuleFilter}
+                showReasoning={showReasoning}
+                setShowReasoning={setShowReasoning}
+                includeRawData={includeRawData}
+                setIncludeRawData={setIncludeRawData}
+                debugMode={debugMode}
+                setDebugMode={setDebugMode}
+                computeRagas={computeRagas}
+                setComputeRagas={setComputeRagas}
+                groundTruth={groundTruth}
+                setGroundTruth={setGroundTruth}
+                sessionId={sessionId}
+                patientId={patientId}
+                doctorId={doctorId}
+              />
+
+              {/* 开始评测按钮 */}
+              <Card>
+                <div style={{ textAlign: "center" }}>
+                  <Button
+                    type="primary"
+                    size="large"
+                    loading={loading}
+                    onClick={evalMode === "single" ? runSingleEvaluate : runAllEvaluate}
+                    disabled={currentFiles.length === 0}
+                    icon={<RocketOutlined />}
+                    style={{ minWidth: 200, height: 48, fontSize: 16 }}
+                  >
+                    {loading ? "评测进行中..." : "开始评测"}
+                  </Button>
+                  {currentFiles.length === 0 && (
+                    <div style={{ marginTop: 12 }}>
+                      <Text type="secondary">请先上传Excel文件</Text>
+                    </div>
+                  )}
+                </div>
+              </Card>
+            </div>
+          )}
+
+          {selectedMenu === "result" && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
+              {/* 单个接口评测结果 */}
+              {evaluationResult && evalMode === "single" && (
+                <SingleEvalResult result={evaluationResult} clientLatency={clientLatencyMillis} />
+              )}
+
+              {/* 所有接口并发评测结果 */}
+              {allEvaluationResult && evalMode === "all" && (
+                <AllEvalResult result={allEvaluationResult} clientLatency={clientLatencyMillis} />
+              )}
+
+              {!evaluationResult && !allEvaluationResult && (
+                <Card>
+                  <div style={{ textAlign: "center", padding: "60px 0" }}>
+                    <Text type="secondary">暂无评测结果</Text>
+                  </div>
+                </Card>
+              )}
+            </div>
+          )}
+        </Content>
+      </Layout>
+
+      {/* Loading遮罩 */}
+      {loading && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0, 0, 0, 0.45)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 9999,
+          }}
+        >
+          <Card style={{ textAlign: "center", minWidth: 300 }}>
+            <Spin size="large" />
+            <div style={{ marginTop: 16, fontSize: 16 }}>
+              <Text strong>评测进行中，请稍候...</Text>
+            </div>
+            {clientLatencyMillis && (
+              <div style={{ marginTop: 8 }}>
+                <Text type="secondary">已用时: {Math.floor(clientLatencyMillis / 1000)}秒</Text>
+              </div>
+            )}
           </Card>
-        )}
-
-        {evaluationResult && (
-          <Card title="组合B明细">
-            <Table rowKey={(r) => r.clinical_scenario + "B"} columns={DETAIL_COLUMNS} dataSource={evaluationResult.combination_b.details} pagination={false} />
-          </Card>
-        )}
-
-        {evaluationResult && evaluationResult["variants"] && (
-          <Card title="更多组合(top@k)">
-            <Table
-              rowKey={(r: any) => r.label}
-              columns={VARIANT_COLUMNS}
-              dataSource={evaluationResult["variants"]}
-              pagination={false}
-            />
-          </Card>
-        )}
-      </div>
-    </div>
+        </div>
+      )}
+    </Layout>
   )
 }

@@ -281,14 +281,15 @@ class AdaptiveRecommendationEngineService:
             confirmed_scenarios: List[Dict[str, Any]],
             patient_info: PatientInfo,
             clinical_context: ClinicalContext,
-            max_recommendations_per_scenario: int
+            max_recommendations_per_scenario: int,
+            direct_return:bool
     ) -> str:
         """构建单次调用提示词"""
         patient_info_content = self.build_patient_context(patient_info)
         clinical_context_content = self.build_clinical_context(clinical_context)
         scenarios_content = self._build_optimized_scenarios_content(confirmed_scenarios)
         task_instruction = self._build_optimized_task_instruction(
-            len(confirmed_scenarios), max_recommendations_per_scenario
+            len(confirmed_scenarios), max_recommendations_per_scenario,direct_return
         )
 
         return f"{patient_info_content}\n{clinical_context_content}\n{scenarios_content}\n{task_instruction}"
@@ -434,56 +435,72 @@ class AdaptiveRecommendationEngineService:
             scenarios_text += "---\n\n"
         return scenarios_text
 
-    def _build_optimized_task_instruction(self, scenario_count: int, max_recommendations_per_scenario: int) -> str:
+    def _build_optimized_task_instruction(self, scenario_count: int, max_recommendations_per_scenario: int,direct_return:bool) -> str:
         """构建优化的任务指令"""
 
-
+        print(direct_return)
+        if direct_return:
+            return f"""
+              ## 任务说明
+    
+              基于患者信息和临床上下文，对{scenario_count}个已确认临床场景的所有推荐项目进行**三级推荐等级划分**。
+    
+              ### 分级标准
+                      - **极其推荐 (Highly Recommended)**: 评分高，证据充分，与患者情况完美匹配，安全性和诊断价值俱佳，无明显禁忌
+                      - **推荐 (Recommended)**: 评分中等，临床适用性良好，风险收益比合理，可能存在轻微限制
+                      - **不太推荐 (Less Recommended)**: 评分低，或存在安全隐患，或有明确禁忌症，或与当前临床需求匹配度不高
+              ##注意
+                  - 每个场景的最终推荐项目必须为{max_recommendations_per_scenario}个。
+                  - 每个场景你都要做推荐的评级，不能掠过。
+              ### 输出格式
+              {{
+                  "selected_scenarios": [
+                      {{
+                          "scenario_index": 这里是索引id(例如：1),
+                          "scenario_id": "场景语义ID",
+                          "comprehensive_score": "0-100综合评分",
+                          "scenario_reasoning": "场景匹配度分析",
+                          "recommendation_grades": {{
+                              "highly_recommended": [1, 3],
+                              "recommended": [2, 4],
+                              "less_recommended": [5]
+                          }},
+                          "final_choices":[该场景项目推荐，注意！填推荐项目的名字，且推荐项目名字必须为{max_recommendations_per_scenario}个！]
+                          "grading_reasoning": "分级临床理由"
+                      }},
+                      {{
+                          "scenario_index": 这里是索引id(例如：2),
+                          "scenario_id": "场景语义ID",
+                          "comprehensive_score": "0-100综合评分",
+                          "scenario_reasoning": "场景匹配度分析",
+                          "recommendation_grades": {{
+                              "highly_recommended": [1, 3],
+                              "recommended": [2, 4],
+                              "less_recommended": [5]
+                          }},
+                          "final_choices":[该场景项目推荐，注意！填推荐项目的名字，且推荐项目名字必须为{max_recommendations_per_scenario}个！]
+                          "grading_reasoning": "分级临床理由"
+                      }},
+                  ],
+                  "overall_reasoning": "总体策略说明"
+              }}
+              **重要：请只输出纯JSON格式，不要包含任何其他文字、说明或Markdown标记！确保JSON格式完全正确。**
+              """
         return f"""
-          ## 任务说明
+        ## 任务说明
+        基于患者信息与临床上下文，以及给定的场景下可供选择的推荐项目，直接给出最终推荐及其原因。
 
-          基于患者信息和临床上下文，对{scenario_count}个已确认临床场景的所有推荐项目进行**三级推荐等级划分**。
+        ### 输出要求（纯文本，中文）
+        - 仅输出文本，不要JSON或其他标记，不要包含额外的解释性段落。
+        - 
+          1) 先输出“推荐项目”：列出最适合患者信息和临床上下文{max_recommendations_per_scenario} 个项目，按优先级从高到低，仅写项目名称，用顿号或逗号分隔。
+          2) 再输出“推荐理由”：简要说明选择依据，结合患者与场景信息，语言精炼。
+        - 严格遵守“先推荐项目，再推荐理由”的顺序。
 
-          ### 分级标准
-                  - **极其推荐 (Highly Recommended)**: 评分高，证据充分，与患者情况完美匹配，安全性和诊断价值俱佳，无明显禁忌
-                  - **推荐 (Recommended)**: 评分中等，临床适用性良好，风险收益比合理，可能存在轻微限制
-                  - **不太推荐 (Less Recommended)**: 评分低，或存在安全隐患，或有明确禁忌症，或与当前临床需求匹配度不高
-          ##注意
-              - 每个场景的最终推荐项目必须为{max_recommendations_per_scenario}个。
-              - 每个场景你都要做推荐的评级，不能掠过。
-          ### 输出格式
-          {{
-              "selected_scenarios": [
-                  {{
-                      "scenario_index": 这里是索引id(例如：1),
-                      "scenario_id": "场景语义ID",
-                      "comprehensive_score": "0-100综合评分",
-                      "scenario_reasoning": "场景匹配度分析",
-                      "recommendation_grades": {{
-                          "highly_recommended": [1, 3],
-                          "recommended": [2, 4],
-                          "less_recommended": [5]
-                      }},
-                      "final_choices":[该场景项目推荐，注意！填推荐项目的名字，且推荐项目名字必须为{max_recommendations_per_scenario}个！]
-                      "grading_reasoning": "分级临床理由"
-                  }},
-                  {{
-                      "scenario_index": 这里是索引id(例如：2),
-                      "scenario_id": "场景语义ID",
-                      "comprehensive_score": "0-100综合评分",
-                      "scenario_reasoning": "场景匹配度分析",
-                      "recommendation_grades": {{
-                          "highly_recommended": [1, 3],
-                          "recommended": [2, 4],
-                          "less_recommended": [5]
-                      }},
-                      "final_choices":[该场景项目推荐，注意！填推荐项目的名字，且推荐项目名字必须为{max_recommendations_per_scenario}个！]
-                      "grading_reasoning": "分级临床理由"
-                  }},
-              ],
-              "overall_reasoning": "总体策略说明"
-          }}
-          **重要：请只输出纯JSON格式，不要包含任何其他文字、说明或Markdown标记！确保JSON格式完全正确。**
-          """
+        ### 文本示例（示意）：
+        推荐项目：项目A，项目B，项目C
+        推荐理由：……
+        """
 
     async def get_recommendations(
             self,
@@ -491,9 +508,9 @@ class AdaptiveRecommendationEngineService:
             patient_info: PatientInfo,
             clinical_context: ClinicalContext,
             max_recommendations_per_scenario: int = 10,
+            direct_return:bool=False,
+            use_adaptive: Optional[bool] = None,  # 可覆盖初始设置
             max_concurrent: int = 3,
-            model_name: str = "gpt-3.5-turbo",
-            use_adaptive: Optional[bool] = None  # 可覆盖初始设置
     ) -> List[Dict[str, Any]]:
         """主入口函数 - 获取推荐结果"""
 
@@ -501,12 +518,12 @@ class AdaptiveRecommendationEngineService:
         adaptive_mode = use_adaptive if use_adaptive is not None else self.use_adaptive
         # 1. 计算token数
         single_prompt = self._build_single_call_prompt(
-            confirmed_scenarios, patient_info, clinical_context, max_recommendations_per_scenario
+            confirmed_scenarios, patient_info, clinical_context, max_recommendations_per_scenario,direct_return
         )
         if adaptive_mode:
             return await self._get_recommendations_adaptive(
                 confirmed_scenarios, patient_info, clinical_context,
-                max_recommendations_per_scenario, max_concurrent, model_name,single_prompt
+                max_recommendations_per_scenario, max_concurrent,single_prompt
             )
         else:
             # 非自适应模式，默认使用单次调用
@@ -522,7 +539,6 @@ class AdaptiveRecommendationEngineService:
             clinical_context: ClinicalContext,
             max_recommendations_per_scenario: int,
             max_concurrent: int,
-            model_name: str,
             single_prompt: str
     ) -> List[Dict[str, Any]]:
         """自适应模式处理"""

@@ -1,4 +1,4 @@
-﻿"""
+"""
 查询标准化服务
 使用LLM将用户的自然语言输入转换为符合ACR标准的结构化文本
 参考test_clinical_scenarios_embedding.py中的实现方式，使用SiliconFlow兼容接口
@@ -138,6 +138,49 @@ class AiService:
             logger.error("LLM响应结构异常: %s - 响应: %s", exc, result)
             raise
         return content
+
+    async def _stream_llm(self, prompt: str):
+        """以流式方式调用LLM，逐段产出文本。
+
+        优先尝试服务端的流式接口（SSE/分块），若不可用则回退为一次性响应并切分行。
+        """
+        client = await self._get_client()
+        payload: Dict[str, Any] = {
+            "model": self.llm_model_name,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.3,
+            "stream": True
+        }
+        try:
+            async with client.stream("POST", "/chat/completions", json=payload) as resp:
+                resp.raise_for_status()
+                async for chunk in resp.aiter_lines():
+                    if not chunk:
+                        continue
+                    if chunk.startswith("data:"):
+                        try:
+                            data_str = chunk[len("data:"):].strip()
+                            if data_str == "[DONE]":
+                                break
+                            obj = json.loads(data_str)
+                            delta = (
+                                obj.get("choices", [{}])[0]
+                                .get("delta", {})
+                                .get("content", "")
+                            )
+                            if delta:
+                                yield delta
+                        except Exception:
+                            continue
+                    else:
+                        # 非SSE格式，直接输出行内容
+                        yield chunk
+        except Exception:
+            # 回退：一次性调用并逐行输出
+            text = await self._call_llm(prompt)
+            for line in text.splitlines():
+                if line.strip():
+                    yield line
 
     def _simple_standardization(
         self,
