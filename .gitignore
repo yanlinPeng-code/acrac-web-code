@@ -9,6 +9,7 @@ wheels/
 # Virtual environments
 backend/.venv
 backend/origin_data
+backend/output_eval
 backend/test_scripts
 backend/dict
 backend/.idea
