@@ -25,6 +25,11 @@ const buildFormData = (params: EvaluationParams): FormData => {
   form.append("similarity_threshold", String(params.similarity_threshold))
   form.append("min_appropriateness_rating", String(params.min_appropriateness_rating))
 
+  // 可选参数 - limit
+  if (params.limit !== undefined && params.limit !== null) {
+    form.append("limit", String(params.limit))
+  }
+
   // 可选参数
   if (params.endpoint) {
     form.append("endpoint", params.endpoint)
@@ -108,17 +113,75 @@ export const evaluateSingleEndpoint = async (
 }
 
 /**
- * 评测所有接口（并发）
+ * 评测所有接口（异步提交）
  */
 export const evaluateAllEndpoints = async (
   params: Omit<EvaluationParams, "endpoint">
-): Promise<AllEvalResponse> => {
+): Promise<{ Code: number; Data: { task_id: string; status: string }; Message: string }> => {
   const url = getApiUrl(API_PATHS.EVALUATE_ALL)
   const formData = buildFormData(params as EvaluationParams)
 
   const response = await fetch(url, {
     method: "POST",
     body: formData,
+  })
+
+  if (!response.ok) {
+    throw new Error(`HTTP error! status: ${response.status}`)
+  }
+
+  const json = await response.json()
+
+  if (!json?.Data) {
+    throw new Error(json?.Message || "响应数据格式错误")
+  }
+
+  return json
+}
+
+/**
+ * 预览Excel数据
+ */
+export const previewExcelData = async (file: File): Promise<{
+  Code: number
+  Data: {
+    preview: any[]
+    total_rows: number
+    preview_limit: number
+    filename: string
+  }
+  Message: string
+}> => {
+  const url = getApiUrl(API_PATHS.PREVIEW_EXCEL)
+  const formData = new FormData()
+  formData.append("file", file)
+
+  const response = await fetch(url, {
+    method: "POST",
+    body: formData,
+  })
+
+  if (!response.ok) {
+    throw new Error(`HTTP error! status: ${response.status}`)
+  }
+
+  const json = await response.json()
+
+  if (!json?.Data) {
+    throw new Error(json?.Message || "响应数据格式错误")
+  }
+
+  return json
+}
+
+/**
+ * 查询任务状态
+ */
+export const getTaskStatus = async (taskId: string): Promise<AllEvalResponse> => {
+  const url = `${getApiUrl(API_PATHS.EVALUATE_ALL).replace('/all', '')}/task/${taskId}`
+
+  const response = await fetch(url, {
+    method: "GET",
   })
 
   if (!response.ok) {

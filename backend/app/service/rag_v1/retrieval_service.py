@@ -177,7 +177,6 @@ class RetrievalService:
         self,
         patient_info: PatientInfo,
         clinical_context: ClinicalContext,
-        standard_query:str,
         search_strategy: Optional[SearchStrategy] = None,
         top_k: int = 16,
         similarity_threshold: float = 0.6,  # 相似度阈值
@@ -210,19 +209,19 @@ class RetrievalService:
             search_strategy = SearchStrategy()
         
         # ========== 阶段1: LLM查询标准化（带缓存） ==========
-        if standard_query:
-            logger.info("命中已经标准化query")
-            standardized_query=standard_query
+        # if standard_query:
+        #     logger.info("命中已经标准化query")
+        #     standardized_query=standard_query
         # 生成缓存键（基于患者信息和临床上下文）
         # cache_key = await self._generate_cache_key(patient_info, clinical_context)
-        
-        # 尝试从Redis获取缓存的标准化查询
+        #
+        # #尝试从Redis获取缓存的标准化查询
         # cached_query = await self._get_cached_standardized_query(cache_key)
-        
+        #
         # if cached_query:
-            # logger.info(f"从缓存获取标准化查询: {cached_query}")
-            # standardized_query = cached_query
-        else:
+        #     logger.info(f"从缓存获取标准化查询: {cached_query}")
+        #     standardized_query = cached_query
+        # else:
             # if need_optimize_query:
             #     # 缓存未命中，调用LLM进行标准化
             #     logger.info("缓存未命中，调用LLM进行查询标准化...")
@@ -236,10 +235,10 @@ class RetrievalService:
             #     await self._cache_standardized_query(cache_key, standardized_query)
             #     logger.info("已将标准化查询存入缓存")
             # else:
-            logger.info("未命中标准化query,正在生成....")
-            if patient_info.gender in self.gender_mapping["男性"] :
+        logger.info("未命中标准化query,正在生成....")
+        if patient_info.gender in self.gender_mapping["男性"] :
                 standardized_query=f"{patient_info.age}岁,{patient_info.gender},{clinical_context.chief_complaint}"
-            else:
+        else:
                 standardized_query=f"{patient_info.age}岁,{patient_info.gender},{patient_info.pregnancy_status},{clinical_context.chief_complaint}"
         # ========== 阶段2: 并行检索（使用asyncio.gather） ==========
         top_p = top_k   # 中间候选集大小
@@ -705,44 +704,6 @@ class RetrievalService:
         # 按相似度分数排序并返回前top_k个结果
         candidates_sorted = sorted(candidates, key=lambda x: x['score'], reverse=True)
         return candidates_sorted[:top_k]
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     def _merge_and_score_v3(
             self,
             search_strategy: SearchStrategy,
@@ -2433,10 +2394,8 @@ class RetrievalService:
             return []
 
         try:
-            # 1. 构建场景列表文本
 
 
-            # 2. 构建患者信息文本
             patient_text = f"""患者信息:
                             - 年龄: {patient_info.age}岁
                             - 性别: {patient_info.gender}
@@ -2461,7 +2420,7 @@ class RetrievalService:
 
             for idx, item in enumerate(scenarios, 1):
                 scenario = item['scenario']
-                scenario_text = f"""场景{idx}:
+                scenario_text = f"""场景:
                                     - ID: {scenario.id}
                                     - 科室: {scenario.panel.name_zh if hasattr(scenario, 'panel') and scenario.panel else '未知'}
                                     - 主题: {scenario.topic.name_zh if hasattr(scenario, 'topic') and scenario.topic else '未知'}
@@ -2525,7 +2484,21 @@ class RetrievalService:
                         4. 症状严重程度与场景的紧急程度匹配
                         5. 是否存在禁忌症（如孕妇避免辐射检查相关场景）
                         
-                        请直接输出选择的场景ID列表（数字ID，不是语义ID），格式为JSON，这是一个例子：
+                         请直接输出选择的场景ID列表，格式为JSON，这是一个例子：
+                          你在选取的时候，需选择对应的ID：
+                              例如：
+                               场景:
+                                      - ID: 1148
+                                      - 科室: 胸外科
+                                      - 主题: 慢性呼吸困难非心血管源性
+                                      - 描述: 成人。慢性呼吸困难。疑似小气道疾病。初始影像学检查。
+                                      - 适用人群: 不限
+                                      - 年龄组: 不限
+                                      - 性别: 不限
+                                      - 妊娠状态: 不限
+                                      - 紧急程度: 不限
+                                      - 症状分类: 未知
+                          你应选择的ID是1148           
                         {{"selected_scenario_ids": [1, 5, 8], "reasoning": "这里填写你选择的原因"}}
                         
                         要求：
@@ -2658,7 +2631,7 @@ class RetrievalService:
         """
         if not scenarios:
             return []
-        
+
         scored_scenarios = []
         for item in scenarios:
             scenario = item['scenario']
@@ -2741,7 +2714,7 @@ class RetrievalService:
     def _calculate_structure_match(
         self, 
         scenario: ClinicalScenario, 
-        patient_info: PatientInfo
+        patient_info: PatientInfo,
     ) -> float:
         """
         计算结构化匹配得分
@@ -2757,6 +2730,7 @@ class RetrievalService:
         count = 0
 
         # 年龄匹配（支持别名和范围解析）
+
         if patient_info.age or scenario.age_group:
             age_match_score = self._match_age(patient_info.age, scenario)
             score += age_match_score
@@ -3220,7 +3194,7 @@ class RetrievalService:
     def _calculate_priority(
             self,
             scenario: ClinicalScenario,
-            clinical_context: ClinicalContext
+            clinical_context: ClinicalContext,
     ) -> float:
         """
         计算临床优先级得分（支持科室别名）
@@ -3505,12 +3479,12 @@ class RetrievalService:
             if isinstance(rule_results, Exception):
                 logger.error(f"❌ 规则排序失败: {rule_results}")
                 rule_results = []
+        else:
+            logger.info("🔧 仅使用规则排序")
+            rule_results = await self.rule_rank_scenarios(
+                    scenarios, patient_info, clinical_context, top_k
+                )
 
-        logger.info("🔧 仅使用规则排序")
-        rule_results = await self.rule_rank_scenarios(
-                scenarios, patient_info, clinical_context, top_k
-            )
-        
         # 去重合并逻辑
         final_scenarios = []
         seen_ids = set()
@@ -3658,7 +3632,10 @@ class RetrievalService:
                                                 scenario_with_recommendations if
                                                 scenario_with_recommendation["recommendations"]]
         llm_ranked_scenarios = await self.llm_rank_scenarios(
-            filter_scenario_with_recommendations, patient_info, clinical_context, max_scenarios
+            scenarios=filter_scenario_with_recommendations,
+            patient_info=patient_info,
+            clinical_context=clinical_context,
+            top_k=max_scenarios,
         )
 
         # 获取推荐项目（基于ACR评分）
@@ -3813,7 +3790,7 @@ class RetrievalService:
         token_nums = self.adaptive_recommendation_engine_service.estimate_tokens_with_tiktoken(prompt)
         threshold = self.adaptive_recommendation_engine_service.strategy.threshold_config["token_threshold"]
 
-        if token_nums < threshold-200:
+        if token_nums < threshold-1500:
             logger.info(f"Token数量({token_nums})小于阈值({threshold})，使用单次LLM调用")
             # 单次LLM调用同时处理场景选择和推荐项目分级
             return await self._llm_recommend_scenarios(
@@ -3825,7 +3802,10 @@ class RetrievalService:
             # 分开处理：先LLM场景重排序，再LLM推荐项目重排序
             # 第一步：LLM场景重排序
             llm_ranked_scenarios = await self.llm_rank_scenarios(
-                filter_scenario_with_recommendations, patient_info, clinical_context, max_scenarios
+                scenarios=filter_scenario_with_recommendations,
+                patient_info=patient_info,
+                clinical_context=clinical_context,
+                top_k=max_scenarios
             )
 
             # 筛选出对应的推荐数据
@@ -3866,6 +3846,9 @@ class RetrievalService:
         )
         #如果是直接返回json数据
         # 第二步：LLM推荐项目重排序
+
+
+
         recommendations = await self.adaptive_recommendation_engine_service.get_recommendations(
                     ranked_scenarios, patient_info, clinical_context,
                     max_recommendations_per_scenario, direct_return, use_adaptive=True
@@ -3882,189 +3865,7 @@ class RetrievalService:
 
 
 
-    # async def _llm_evaluate_single_scenario(
-    #             self,
-    #             scenario_data: Dict[str, Any],
-    #             patient_info: PatientInfo,
-    #             clinical_context: ClinicalContext,
-    #             top_k: int = 3
-    #     ) -> Dict[str, Any]:
-    #         """
-    #         使用LLM评估单个场景，动态选择top_k个最佳推荐并计算综合评分
-    #
-    #         Args:
-    #             scenario_data: 单个场景数据（包含场景和推荐列表）
-    #             patient_info: 患者信息
-    #             clinical_context: 临床上下文
-    #             top_k: 需要返回的最佳推荐数量
-    #
-    #         Returns:
-    #             包含分级推荐和综合评分的结果
-    #         """
-    #         scenario = scenario_data['scenario']
-    #         recommendations = scenario_data.get('recommendations', [])
-    #
-    #         if not recommendations:
-    #             logger.warning(f"场景{scenario.semantic_id}没有推荐项目")
-    #             return None
-    #
-    #         # 动态调整top_k，确保不超过推荐项目总数
-    #         actual_top_k = min(top_k, len(recommendations))
-    #
-    #         # 安全获取科室名称
-    #         try:
-    #             panel_name = scenario.panel.name_zh if hasattr(scenario, 'panel') and scenario.panel else '未知'
-    #         except Exception:
-    #             panel_name = '未知'
-    #
-    #         # 构建推荐项目列表文本
-    #         recommendation_texts = []
-    #         rec_index_map = {}  # {index: rec_data}
-    #
-    #         for idx, rec_data in enumerate(recommendations, 1):
-    #             recommendation = rec_data['recommendation']
-    #             procedure = rec_data['procedure']
-    #
-    #             rec_text = f"""推荐项目{idx}:
-    # - 检查名称: {procedure.name_zh}
-    # - 检查方式: {procedure.modality or '未知'}
-    # - 检查部位: {procedure.body_part or '未知'}
-    # - ACR适宜性评分: {recommendation.appropriateness_rating}/9
-    # - 适宜性类别: {recommendation.appropriateness_category_zh or '未知'}
-    # - 是否使用对比剂: {'是' if procedure.contrast_used else '否'}
-    # - 辐射等级: {procedure.radiation_level or '无'}
-    # - 推荐理由: {recommendation.reasoning_zh[:100] if recommendation.reasoning_zh else '无'}
-    # - 特殊考虑: {recommendation.special_considerations[:100] if recommendation.special_considerations else '无'}
-    # - 妊娠安全性: {recommendation.pregnancy_safety or '未知'}
-    # """
-    #             recommendation_texts.append(rec_text)
-    #             rec_index_map[idx] = rec_data
-    #
-    #         # 构建患者信息
-    #         patient_text = f"""患者信息:
-    # - 年龄: {patient_info.age}岁
-    # - 性别: {patient_info.gender}
-    # - 妊娠状态: {patient_info.pregnancy_status or '非妊娠期'}
-    # - 过敏史: {', '.join(patient_info.allergies) if patient_info.allergies else '无'}
-    # - 合并症: {', '.join(patient_info.comorbidities) if patient_info.comorbidities else '无'}
-    # - 检查报告: {patient_info.physical_examination or '无'}
-    #
-    # 临床信息:
-    # - 科室: {clinical_context.department}
-    # - 主诉: {clinical_context.chief_complaint}
-    # - 既往病史: {clinical_context.medical_history or '无'}
-    # - 现病史: {clinical_context.present_illness or '无'}
-    # - 主诊断结果: {clinical_context.diagnosis or '待诊断'}
-    # - 症状严重程度: {clinical_context.symptom_severity or '未知'}
-    # - 症状持续时间: {clinical_context.symptom_duration or '未知'}
-    # """
-    #
-    #         # 构建场景信息
-    #         scenario_text = f"""临床场景:
-    # - 场景描述: {scenario.description_zh}
-    # - 科室: {panel_name}
-    # - 适用人群: {scenario.patient_population or '未知'}
-    # - 临床背景: {scenario.clinical_context or '未知'}
-    # """
-    #         recommendation_text = "\n".join(recommendation_texts)
-    #
-    #         # 构建Prompt - 修改为动态选择top_k
-    #         prompt = f"""你是一位经验丰富的临床医生。请根据以下患者信息和临床场景，从推荐项目中选择最适合的{actual_top_k}个检查。
-    #
-    # {patient_text}
-    #
-    # {scenario_text}
-    #
-    # 可选推荐项目：
-    # {recommendation_text}
-    #
-    # 请完成以下任务：
-    #
-    # 1. **选择最佳推荐**：
-    #    - 请选择最适合患者的{actual_top_k}个检查，按优先级从高到低排序
-    #    - 考虑因素：ACR评分、临床需求匹配度、患者安全性、检查可行性
-    #
-    # 2. **综合评分** (0-100分)：
-    #    - 评估该场景与患者情况的总体匹配度
-    #    - 考虑因素：场景描述匹配、适用人群匹配、科室对应、推荐项目质量
-    #
-    # 3. **推理说明**（不超过150字）：
-    #    - 简要说明选择理由和排序依据
-    #    - 解释综合评分的依据
-    #
-    # 请直接输出JSON格式结果，这是一个例子：
-    # {{
-    #     "top_k_indices": [1, 3, 2],
-    #     "comprehensive_score": 这里是综合的分数,
-    #     "reasoning": "简短说明，不超150字"
-    # }}
-    #
-    # 要求：
-    # - 必须选择{actual_top_k}个不同的推荐项目索引，按优先级从高到低排列
-    # - 综合评分必须为0-100之间的整数
-    # - 推理说明必须简洁，严格不超过150个中文字符
-    # - 不要输出其他解释文字，只输出JSON，确保JSON完整
-    # """
-    #
-    #         # 调用LLM
-    #         response = await self.ai_service._call_llm(prompt)
-    #
-    #         # 解析JSON结果
-    #         import re
-    #         import json
-    #
-    #         json_match = re.search(r'\{.*\}', response, re.DOTALL)
-    #         if not json_match:
-    #             logger.error(f"场景{scenario.semantic_id} LLM返回格式错误")
-    #             return None
-    #
-    #         try:
-    #             result = json.loads(json_match.group())
-    #         except json.JSONDecodeError:
-    #             logger.error(f"场景{scenario.semantic_id} LLM返回JSON解析错误")
-    #             return None
-    #
-    #         # 提取结果
-    #         top_k_indices = result.get('top_k_indices', [])
-    #         comprehensive_score = result.get('comprehensive_score', 0)
-    #         reasoning = result.get('reasoning', '')
-    #
-    #         # 验证索引数量和有效性
-    #         if len(top_k_indices) < actual_top_k:
-    #             logger.warning(f"场景{scenario.semantic_id} LLM返回的推荐数量不足{actual_top_k}个")
-    #             # 如果返回数量不足，只取有效的部分
-    #             valid_indices = [idx for idx in top_k_indices if idx in rec_index_map]
-    #         else:
-    #             valid_indices = top_k_indices[:actual_top_k]
-    #
-    #         if not valid_indices:
-    #             logger.warning(f"场景{scenario.semantic_id} LLM未返回有效的推荐项目")
-    #             return None
-    #
-    #         # 构建top_k推荐列表
-    #         top_k_recommendations = []
-    #         for idx in valid_indices:
-    #             if idx in rec_index_map:
-    #                 top_k_recommendations.append(rec_index_map[idx])
-    #             else:
-    #                 logger.warning(f"场景{scenario.semantic_id} 无效的推荐索引: {idx}")
-    #
-    #         # 构建返回结果 - 修改为动态的top_k结构
-    #         return {
-    #             'comprehensive_score': comprehensive_score,
-    #             'reasoning': reasoning,
-    #             'top_k_recommendations': top_k_recommendations,
-    #             'recommendation_count': len(top_k_recommendations),
-    #             'requested_top_k': actual_top_k,
-    #             'scenario_metadata': {
-    #                 'scenario_id': scenario.semantic_id,
-    #                 'description': scenario.description_zh,
-    #                 'llm_rank': scenario_data.get('llm_rank'),
-    #                 'selection_source': scenario_data.get('selection_source_by_llm') or scenario_data.get(
-    #                     'selection_source_by_rule'),
-    #                 'panel': panel_name
-    #             }
-    #         }
+
     async def _llm_evaluate_single_scenario(
         self,
         scenario_data: Dict[str, Any],
@@ -4232,53 +4033,7 @@ class RetrievalService:
         }
     
 
-    
-    def _select_best_from_category(
-        self,
-        category_recommendations: List[Dict],
-        patient_info: PatientInfo,
-        clinical_context: ClinicalContext,
-        top_n: int = 1
-    ) -> List[Dict[str, Any]]:
-        """
-        从某个等级的推荐中选择最佳的N项
-        
-        选择逻辑：
-        1. 过滤不安全的检查（妊娠+辐射、过敏+造影剂）
-        2. 按ACR评分排序
-        3. 返回top_n
-        """
-        if not category_recommendations:
-            return []
-        
-        safe_recommendations = []
-        
-        for rec in category_recommendations:
-            # 安全性检查
-            is_safe = True
-            
-            # 妊娠妇女避免辐射
-            if patient_info.pregnancy_status and '妊' in patient_info.pregnancy_status:
-                if rec['radiation'] and rec['radiation'] != '无' and rec['radiation'] != '低':
-                    is_safe = False
-            
-            # 过敏史避免造影剂
-            if patient_info.allergies and '造影剂' in str(patient_info.allergies):
-                if rec['contrast'] == '是':
-                    is_safe = False
-            
-            if is_safe:
-                safe_recommendations.append(rec)
-        
-        # 如果所有推荐都被过滤，返回原始列表
-        if not safe_recommendations:
-            safe_recommendations = category_recommendations
-        
-        # 按评分排序
-        safe_recommendations.sort(key=lambda x: x['rating'], reverse=True)
-        
-        # 返回top_n的完整数据
-        return [rec['rec_data'] for rec in safe_recommendations[:top_n]]
+
 
     async def get_scenarios_with_recommends(
             self,
@@ -4620,19 +4375,6 @@ class RetrievalService:
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
     def build_patient_context(self,patient_info: PatientInfo) -> str:
             """构建患者信息"""
             # 患者和临床信息
@@ -4835,8 +4577,10 @@ class RetrievalService:
             patient_info: PatientInfo,
             clinical_context: ClinicalContext,
             max_scenarios: int,
-            max_recommendations_per_scenario: int
+            max_recommendations_per_scenario: int,
     ) -> str:
+
+
          patient_info_content=self.build_patient_context(patient_info)
          clinical_context_content=self.build_clinical_context(clinical_context)
          scenarios_content=self.build_scenarios_with_recommend(all_scenarios)
@@ -4868,6 +4612,25 @@ class RetrievalService:
             final_scenarios = filter_scenario_with_recommendations[:max_scenarios]
             logger.info(f"过滤场景数量({len(filter_scenario_with_recommendations)})充足，截取前{max_scenarios}个")
         return final_scenarios
+
+    async def llm_rerank_final_choices(self,
+                                       all_scenarios, patient_info, clinical_context, strategy, min_rating,
+                                       direct_return,
+                                       max_scenarios, max_recommendations_per_scenario
+                                       ):
+        pass
+
+    async def simple_rerank_final_choices(self,
+                                          all_scenarios, patient_info, clinical_context, strategy, min_rating,
+                                          direct_return,
+                                          max_scenarios, max_recommendations_per_scenario
+                                          ):
+        pass
+
+
+
+
+
 
 
 

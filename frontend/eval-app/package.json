@@ -9,6 +9,8 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@visactor/react-vchart": "^1.11.0",
+    "@visactor/vchart": "^1.11.0",
     "@vitejs/plugin-react": "^5.1.1",
     "antd": "^5.20.0",
     "react": "^18.3.1",

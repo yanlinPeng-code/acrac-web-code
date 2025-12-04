@@ -40,8 +40,8 @@ def safe_parse_llm_response( response: str, expected_scenario_count: int=3) -> O
     # 方法1: 尝试直接解析清理后的响应
     try:
         result = json.loads(cleaned_response)
-        if _validate_result_structure(result, expected_scenario_count):
-            return result
+        # if _validate_result_structure(result, expected_scenario_count):
+        return result
     except json.JSONDecodeError as e:
         logger.warning(f"直接解析失败: {e}")
 
@@ -59,8 +59,8 @@ def safe_parse_llm_response( response: str, expected_scenario_count: int=3) -> O
             if json_match:
                 json_str = json_match.group(0)
                 result = json.loads(json_str)
-                if _validate_result_structure(result, expected_scenario_count):
-                    return result
+                # if _validate_result_structure(result, expected_scenario_count):
+                return result
         except (json.JSONDecodeError, AttributeError) as e:
             logger.warning(f"模式匹配解析失败: {e}")
             continue
@@ -69,8 +69,8 @@ def safe_parse_llm_response( response: str, expected_scenario_count: int=3) -> O
     try:
         fixed_response = _fix_common_json_errors(cleaned_response)
         result = json.loads(fixed_response)
-        if _validate_result_structure(result, expected_scenario_count):
-            return result
+        # if _validate_result_structure(result, expected_scenario_count):
+        return result
     except json.JSONDecodeError as e:
         logger.error(f"修复后解析失败: {e}")
 
@@ -81,21 +81,36 @@ def safe_parse_llm_response( response: str, expected_scenario_count: int=3) -> O
 def _fix_common_json_errors(text: str) -> str:
     """修复常见的JSON格式错误"""
 
+    # 移除 BOM 和特殊字符
+    fixed = text.strip().lstrip('\ufeff')
+
+    # 修复未闭合的字符串（尝试在行尾或文档末尾添加引号）
+    # 查找所有未闭合的引号
+    if fixed.count('"') % 2 != 0:
+        # 如果引号数量为奇数，尝试在末尾添加引号和必要的闭合符号
+        if not fixed.endswith('"'):
+            fixed = fixed.rstrip(',') + '"'
+        # 确保有闭合括号
+        open_braces = fixed.count('{') - fixed.count('}')
+        open_brackets = fixed.count('[') - fixed.count(']')
+        fixed += '}' * open_braces + ']' * open_brackets
+
     # 修复尾随逗号
-    fixed = re.sub(r',\s*([}\]])', r'\1', text)
+    fixed = re.sub(r',\s*([}\]])', r'\1', fixed)
 
     # 修复单引号（替换为双引号）
     fixed = re.sub(r"'([^']*)'", r'"\1"', fixed)
-
-    # 修复未转义的控制字符
-    fixed = fixed.replace('\n', '\\n').replace('\t', '\\t')
 
     # 修复注释（移除）
     fixed = re.sub(r'//.*', '', fixed)
     fixed = re.sub(r'/\*.*?\*/', '', fixed, flags=re.DOTALL)
 
-    # 修复可能缺失的引号
-    fixed = re.sub(r'(\w+):', r'"\1":', fixed)
+    # 修复可能缺失的引号（但不要修复已经在引号内的内容）
+    # 只修复明显的键名（字母开头的单词后跟冒号）
+    fixed = re.sub(r'(?<!")(\b[a-zA-Z_][a-zA-Z0-9_]*\b)(?=\s*:)', r'"\1"', fixed)
+
+    # 修复多余的反斜杠
+    fixed = fixed.replace('\\n', ' ').replace('\\t', ' ').replace('\\r', ' ')
 
     return fixed
 

@@ -7,7 +7,6 @@ from datetime import datetime, date
 from sqlmodel import Field, SQLModel, Relationship, Column
 from sqlalchemy import Text, TIMESTAMP
 from sqlalchemy.sql import func
-from pgvector.sqlalchemy import Vector
 
 class Panel(SQLModel, table=True):
     """Panel表 - 科室/专科"""
@@ -29,8 +28,7 @@ class Panel(SQLModel, table=True):
         sa_column=Column(TIMESTAMP, server_default=func.now(), onupdate=func.now()),
         description="更新时间"
     )
-    embedding: Optional[List[float]] = Field(default=None, sa_column=Column(Vector(1024)), description="向量嵌入")
-    
+
     # Relationships
     topics: List["Topic"] = Relationship(back_populates="panel", sa_relationship_kwargs={"cascade": "all, delete-orphan"})
     scenarios: List["ClinicalScenario"] = Relationship(back_populates="panel", sa_relationship_kwargs={"cascade": "all, delete-orphan"})
@@ -59,8 +57,7 @@ class Topic(SQLModel, table=True):
         sa_column=Column(TIMESTAMP, server_default=func.now(), onupdate=func.now()),
         description="更新时间"
     )
-    embedding: Optional[List[float]] = Field(default=None, sa_column=Column(Vector(1024)), description="层次化向量嵌入")
-    
+
     # Relationships
     panel: Optional["Panel"] = Relationship(back_populates="topics")
     scenarios: List["ClinicalScenario"] = Relationship(back_populates="topic", sa_relationship_kwargs={"cascade": "all, delete-orphan"})
@@ -97,8 +94,7 @@ class ClinicalScenario(SQLModel, table=True):
         sa_column=Column(TIMESTAMP, server_default=func.now(), onupdate=func.now()),
         description="更新时间"
     )
-    embedding: Optional[List[float]] = Field(default=None, sa_column=Column(Vector(2560)), description="层次化向量嵌入")
-    
+
     # Relationships
     panel: Optional["Panel"] = Relationship(back_populates="scenarios")
     topic: Optional["Topic"] = Relationship(back_populates="scenarios")
@@ -137,8 +133,7 @@ class ProcedureDictionary(SQLModel, table=True):
         sa_column=Column(TIMESTAMP, server_default=func.now(), onupdate=func.now()),
         description="更新时间"
     )
-    embedding: Optional[List[float]] = Field(default=None, sa_column=Column(Vector(1024)), description="独立向量嵌入")
-    
+
     # Relationships
     recommendations: List["ClinicalRecommendation"] = Relationship(back_populates="procedure", sa_relationship_kwargs={"cascade": "all, delete-orphan"})
     
@@ -182,8 +177,7 @@ class ClinicalRecommendation(SQLModel, table=True):
         sa_column=Column(TIMESTAMP, server_default=func.now(), onupdate=func.now()),
         description="更新时间"
     )
-    embedding: Optional[List[float]] = Field(default=None, sa_column=Column(Vector(1024)), description="完整临床决策向量嵌入")
-    
+
     # Relationships
     scenario: Optional["ClinicalScenario"] = Relationship(back_populates="recommendations")
     procedure: Optional["ProcedureDictionary"] = Relationship(back_populates="recommendations")
@@ -199,7 +193,6 @@ class VectorSearchLog(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True, index=True)
     query_text: str = Field(sa_column=Column(Text), description="搜索文本")
     query_type: Optional[str] = Field(default=None, max_length=50, description="查询类型")
-    search_vector: Optional[List[float]] = Field(default=None, sa_column=Column(Vector(1024)), description="搜索向量")
     results_count: Optional[int] = Field(default=None, description="结果数量")
     search_time_ms: Optional[int] = Field(default=None, description="搜索耗时（毫秒）")
     user_id: Optional[int] = Field(default=None, description="用户ID")

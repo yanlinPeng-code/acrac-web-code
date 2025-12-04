@@ -10,10 +10,9 @@ app=create_app()
 @app.get("/")
 def read_root():
     """根路径"""
-    return app.state.medical_dict
     return {
         "message": "Welcome to ACRO API",
-        "version": settings.APP_VERSION,
+        "version": settings.VERSION,
         "docs": "/docs",
         "redoc": "/redoc"
     }
@@ -24,8 +23,8 @@ def health_check():
     """健康检查"""
     return {
         "status": "healthy",
-        "app": settings.APP_NAME,
-        "version": settings.APP_VERSION
+        "app": settings.PROJECT_NAME,
+        "version": settings.VERSION
     }
 
 
@@ -36,7 +35,7 @@ if __name__ == "__main__":
     uvicorn.run(
         app,
         host="0.0.0.0",
-        port=8000,
+        port=8002,
         reload=settings.DEBUG,
         log_level="info"
     )

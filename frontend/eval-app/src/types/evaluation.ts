@@ -68,19 +68,31 @@ export interface EndpointEvalResult {
   error?: string
 }
 
+// 接口汇总数据（Sheet 5）
+export interface EndpointSummary {
+  api_name: string
+  top1_hit_count: number
+  top3_hit_count: number
+  top1_accuracy: number
+  top3_accuracy: number
+  avg_response_time_ms: number
+  total_time_ms: number
+}
+
 // 所有接口评测响应数据
 export interface AllEvaluationData {
-  summary: AllEvaluationSummary
-  endpoint_results: {
+  summary?: AllEvaluationSummary
+  endpoint_results?: {
     [key: string]: EndpointEvalResult
   }
+  endpoint_summary?: EndpointSummary[]
   csv_file_path?: string
 }
 
 // 所有接口评测响应
 export interface AllEvalResponse {
   RequestId: string
-  Data: AllEvaluationData
+  Data: AllEvaluationData | { task_id: string; status: string; preview?: any[] }
 }
 
 // 评测请求参数
@@ -88,6 +100,7 @@ export interface EvaluationParams {
   file: File
   endpoint?: EndpointType
   standard_query?:string
+  limit?: number
   top_scenarios: number
   top_recommendations_per_scenario: number
   similarity_threshold: number

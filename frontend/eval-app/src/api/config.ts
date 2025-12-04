@@ -4,7 +4,9 @@
  */
 
 // 基础URL配置
-export const API_BASE_URL = "http://localhost:8000"
+// 生产环境使用空字符串，通过Nginx代理访问后端
+// 开发环境通过vite.config.ts的proxy配置
+export const API_BASE_URL = ""
 
 // API路径
 export const API_PATHS = {
@@ -13,6 +15,9 @@ export const API_PATHS = {
 
   // 所有接口并发评测
   EVALUATE_ALL: "/api/v1/evaluate-recommend/all",
+
+  // Excel预览
+  PREVIEW_EXCEL: "/api/v1/evaluate-recommend/preview",
 } as const
 
 // 支持的endpoint列表

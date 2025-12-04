@@ -49,12 +49,14 @@
 
 ### 使用Docker部署（推荐）
 
-#### Windows
+#### 本地开发环境
+
+**Windows**
 ```bash
 deploy.bat
 ```
 
-#### Linux/Mac
+**Linux/Mac**
 ```bash
 chmod +x deploy.sh
 ./deploy.sh
@@ -64,6 +66,31 @@ chmod +x deploy.sh
 - **前端**: http://localhost:5188
 - **后端API**: http://localhost:8000
 - **API文档**: http://localhost:8000/docs
+
+#### 云服务器生产环境部署
+
+在Linux云服务器（阿里云、腾讯云、AWS等）上部署，并暴露到公网：
+
+```bash
+# 克隆代码到服务器
+git clone <your-repo> /opt/acrac-app
+cd /opt/acrac-app
+
+# 执行生产环境部署脚本
+chmod +x deploy-prod.sh
+./deploy-prod.sh
+```
+
+部署成功后，通过公网访问：
+- **前端应用**: http://你的服务器IP:6188
+- **API文档**: http://你的服务器IP:6188/docs
+- **ReDoc文档**: http://你的服务器IP:6188/redoc
+- **健康检查**: http://你的服务器IP:6188/health
+
+**注意事项**：
+- 确保云服务器安全组已开放 **6188** 端口
+- 所有服务都通过Nginx统一代理，提供统一访问入口
+- 详细部署指南请查看 [CLOUD_DEPLOYMENT.md](./CLOUD_DEPLOYMENT.md)
 
 ### 本地开发
 

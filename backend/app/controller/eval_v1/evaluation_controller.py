@@ -1,10 +1,10 @@
 from fastapi import APIRouter, Request, UploadFile, File, Form
 from typing import Optional, Dict, Any
-
 from app.response.response_models import BaseResponse
 from app.response.utils import success_200, bad_request_400
 from app.dependencies.dependency import EvaluationDep
 
+from app.schema.eval_schema import EvalRequest
 
 router = APIRouter(prefix="/api/v1", tags=["评估模块"])
 
@@ -60,8 +60,8 @@ async def evaluate_recommend(
 
     # 根据endpoint确定server_url
     server_url_map = {
-        "recommend": "http://203.83.233.236:8000",
-        "recommend-simple": "http://203.83.233.236:8000",
+        "recommend": "http://localhost:8000",
+        "recommend-simple": "http://localhost:8000",
         "intelligent-recommendation": "http://203.83.233.236:5189",
         "recommend_item_with_reason": "http://203.83.233.236:5187",
     }
@@ -129,35 +129,118 @@ async def evaluate_recommend(
 
 
 @router.post(
+    path="/evaluate-recommend/preview",
+    summary="预览Excel评测数据",
+    description="上传Excel文件并返回前100行预览数据",
+    response_model=BaseResponse[Dict[str, Any]],
+)
+async def preview_excel_data(
+    http_request: Request,
+    evaluation_service: EvaluationDep,
+    file: UploadFile = File(...),
+):
+    """预览Excel评测数据
+
+    上传Excel文件，返回前100行数据供用户确认
+    不执行任何评测任务
+    """
+    client_ip = getattr(http_request.state, "client_ip", None)
+    request_id = getattr(http_request.state, "request_id", None)
+
+    # 验证文件类型
+    if not file.filename.endswith(('.xlsx', '.xls')):
+        return bad_request_400("仅支持Excel文件格式（.xlsx, .xls）", request_id=request_id, host_id=client_ip)
+
+    content = await file.read()
+
+    # 获取预览数据
+    preview_data = await evaluation_service.get_excel_preview(content)
+
+    if not preview_data:
+        return bad_request_400("Excel文件为空或格式错误", request_id=request_id, host_id=client_ip)
+
+    return success_200(
+        {
+            "preview": preview_data,
+            "total_rows": len(preview_data),
+            "preview_limit": min(100, len(preview_data)),
+            "filename": file.filename
+        },
+        message="Excel预览加载成功",
+        request_id=request_id,
+        host_id=client_ip
+    )
+
+
+@router.post(
     path="/evaluate-recommend/all",
     summary="评估所有推荐接口",
-    description="并发调用4个推荐接口进行评估并返回汇总结果",
+    description="异步并发调用4个推荐接口进行评估并返回任务ID",
     response_model=BaseResponse[Dict[str, Any]],
 )
 async def evaluate_all_recommend(
     http_request: Request,
     evaluation_service: EvaluationDep,
     file: UploadFile = File(...),
+    limit: Optional[int] = Form(None),
     top_scenarios: int = Form(3),
     top_recommendations_per_scenario: int = Form(3),
     similarity_threshold: float = Form(0.7),
     min_appropriateness_rating: int = Form(5),
 ):
-    """并发评估所有4个推荐接口
+    """异步并发评估所有4个推荐接口
 
     必须上传Excel文件，包含临床场景和标准答案
+    limit: 评测数据条数，默认为全部
+    返回任务ID（不包含预览数据，预览请使用 /preview 接口）
     """
     client_ip = getattr(http_request.state, "client_ip", None)
     request_id = getattr(http_request.state, "request_id", None)
 
+    # 验证文件类型
+    if not file.filename.endswith(('.xlsx', '.xls')):
+        return bad_request_400("仅支持Excel文件格式（.xlsx, .xls）", request_id=request_id, host_id=client_ip)
+
     content = await file.read()
 
-    data = await evaluation_service.evaluate_all_endpoints(
+    # 提交评测任务（不再并发预览）
+    import asyncio
+    task_id = await asyncio.to_thread(
+        evaluation_service.submit_evaluation_task,
         file_bytes=content,
+        limit=limit,
         top_scenarios=top_scenarios,
         top_recommendations_per_scenario=top_recommendations_per_scenario,
         similarity_threshold=similarity_threshold,
         min_appropriateness_rating=min_appropriateness_rating,
     )
 
-    return success_200(data, message="所有接口评估完成", request_id=request_id, host_id=client_ip)
+    return success_200(
+        {"task_id": task_id, "status": "pending"},
+        message="评测任务已提交，请使用task_id查询结果",
+        request_id=request_id,
+        host_id=client_ip
+    )
+
+
+@router.get(
+    path="/evaluate-recommend/task/{task_id}",
+    summary="查询评测任务状态",
+    description="根据任务ID查询评测任务的状态和结果",
+    response_model=BaseResponse[Dict[str, Any]],
+)
+async def get_evaluation_task_status(
+    http_request: Request,
+    evaluation_service: EvaluationDep,
+    task_id: str,
+):
+    """查询评测任务状态
+
+    返回任务状态：PENDING（等待中）、STARTED（执行中）、SUCCESS（成功）、FAILURE（失败）
+    """
+    client_ip = getattr(http_request.state, "client_ip", None)
+    request_id = getattr(http_request.state, "request_id", None)
+
+    response = evaluation_service.get_task_status(task_id)
+
+    return success_200(response, message="查询成功", request_id=request_id, host_id=client_ip)

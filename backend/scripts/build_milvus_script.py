@@ -1,6 +1,8 @@
 from langchain_community.vectorstores import Milvus
 import asyncio
 import json
+import logging
+import os
 from typing import Union
 from langchain_core.documents import Document
 from  langchain_openai import OpenAIEmbeddings
@@ -11,6 +13,15 @@ from sqlmodel import select
 from app.config.config import settings
 from app.config.database import async_db_manager
 from app.model import ClinicalScenario, Topic, Panel
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger("milvus_builder")
+
+# Milvus 连接配置（从环境变量读取）
+MILVUS_URI = os.getenv("MILVUS_URI", "http://localhost:19530")
+MILVUS_DB_NAME = os.getenv("MILVUS_DB_NAME", "acrac")
+MILVUS_COLLECTION_NAME = os.getenv("MILVUS_COLLECTION_NAME", "scenarios")
 def init_embedding_model():
     print(f"api_key:{settings.OPENAI_API_KEY}")
     print(f"base_url:{settings.OLLAMA_BASE_URL}")
@@ -77,13 +88,14 @@ async def get_document(
         print(f"第一个文档 ID: {documents[0].id}, 类型: {type(documents[0].id)}")
 
     return documents
+
 # 假设你的_init_milvus_client返回的是langchain的Milvus实例（含连接信息）
 def _init_milvus_client():
     return Milvus(
         drop_old=False,
-        collection_name="scenarios",  # 暂时不指定集合名，创建时再指定
+        collection_name=MILVUS_COLLECTION_NAME,
         embedding_function=init_embedding_model(),  # 你的密集向量模型
-        connection_args={"uri": "http://10.101.1.178:19530", "db_name": "acrac"},
+        connection_args={"uri": MILVUS_URI, "db_name": MILVUS_DB_NAME},
     )
 
 
@@ -202,7 +214,6 @@ async def create_collection(name: str, origin_text_name: str = "text"):
 async def insert_vector(collection_name: str, origin_text_name: str = "text"):
     # 1. 先确保集合已创建（实际使用时可加判断，避免重复创建）
 
-
     # 2. 获取文档数据
     docs = await get_document()  # 你的文档获取逻辑
 
@@ -219,7 +230,7 @@ async def insert_vector(collection_name: str, origin_text_name: str = "text"):
 
         primary_field="id",
         collection_name=collection_name,
-        connection_args={"uri": "http://10.101.1.178:19530", "db_name": "acrac"},
+        connection_args={"uri": MILVUS_URI, "db_name": MILVUS_DB_NAME},
         text_field=origin_text_name,  # 原始文本对应字段
         vector_field=["text_dense", "text_sparse"],  # 向量字段映射（密集+稀疏）
         drop_old=False,  # 关键：不删除旧集合，复用已创建的
@@ -237,14 +248,76 @@ async def recreate_collection(collection_name: str, origin_text_name: str = "tex
     client = vector_store.aclient
     exists = await client.has_collection(collection_name)
     if exists:
+        logger.info(f"Collection '{collection_name}' exists. Dropping...")
         await client.drop_collection(collection_name)
     await create_collection(collection_name, origin_text_name)
 
 
+async def check_collection_exists(collection_name: str) -> bool:
+    """检查 Milvus 集合是否存在且有数据"""
+    try:
+        vector_store = _init_milvus_client()
+        client = vector_store.aclient
+
+        # 检查集合是否存在
+        exists = await client.has_collection(collection_name)
+        if not exists:
+            print(f"集合 '{collection_name}' 不存在")
+            return False
+
+        # 检查集合中是否有数据
+        stats = await client.get_collection_stats(collection_name)
+        row_count = stats.get('row_count', 0)
+
+        if row_count > 0:
+            print(f"集合 '{collection_name}' 已存在，包含 {row_count} 条数据")
+            return True
+        else:
+            print(f"集合 '{collection_name}' 存在但为空")
+            return False
+    except Exception as e:
+        print(f"检查集合时出错: {e}")
+        return False
+
+
+async def main_build_milvus(collection_name: str = "scenarios", recreate: bool = False):
+    """主函数：构建或检查 Milvus 向量数据库
+
+    Args:
+        collection_name: 集合名称
+        recreate: 是否强制重建集合（删除现有数据）
+    """
+    try:
+        # 检查集合是否已存在并有数据
+        has_data = await check_collection_exists(collection_name)
+
+        if has_data and not recreate:
+            print(f"集合 '{collection_name}' 已包含数据，跳过 embedding 过程")
+            print("如果需要重建，请使用 recreate=True 参数")
+            return True
+
+        if recreate:
+            print(f"强制重建集合 '{collection_name}'...")
+            await recreate_collection(collection_name)
+        else:
+            print(f"创建新集合 '{collection_name}'...")
+            await create_collection(collection_name)
+
+        print(f"开始向集合 '{collection_name}' 插入向量数据...")
+        await insert_vector(collection_name)
+        print("Milvus 向量数据库构建完成")
+        return True
+
+    except Exception as e:
+        print(f"构建 Milvus 向量数据库时出错: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 if __name__ == '__main__':
-   # 如需一键修复 schema，可先执行重建（会清空原集合数据）
-   # asyncio.run(recreate_collection(collection_name="scenarios"))
-   # asyncio.run(create_collection("scenarios"))
-   # vector=_init_milvus_client()
-   # print(vector.max_marginal_relevance_search("nihao"))
-   asyncio.run(insert_vector(collection_name="scenarios"))
+   # 默认：检查数据是否存在，如果不存在则创建
+   asyncio.run(main_build_milvus(collection_name=MILVUS_COLLECTION_NAME, recreate=False))
+
+   # 如需强制重建集合（会清空原数据），使用：
+   # asyncio.run(main_build_milvus(collection_name=MILVUS_COLLECTION_NAME, recreate=True))

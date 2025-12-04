@@ -65,12 +65,6 @@ try:
 except Exception:
     pass
 
-try:
-    from pgvector.psycopg2 import register_vector
-    PGVECTOR_AVAILABLE = True
-except Exception:
-    PGVECTOR_AVAILABLE = False
-
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("acrac_builder")
 
@@ -128,23 +122,16 @@ class SiliconFlowEmbedder:
 
 
 class ACRACBuilder:
-    def __init__(self, db_config: Optional[Dict[str, str]] = None, api_key: Optional[str] = None, model: Optional[str] = None, allow_random: bool = False, embedding_dim: Optional[int] = None):
+    def __init__(self, db_config: Optional[Dict[str, str]] = None):
         self.db_config = db_config or {
             "host": os.getenv("PGHOST", "localhost"),
             "port": os.getenv("PGPORT", "5432"),
-            "database": os.getenv("PGDATABASE", "acrac_db"),
+            "database": os.getenv("PGDATABASE", "acrac_v1_db"),
             "user": os.getenv("PGUSER", "postgres"),
             "password": os.getenv("PGPASSWORD", "password"),
         }
         self.conn = None
         self.cursor = None
-
-        self.embedder = SiliconFlowEmbedder(api_key=api_key, model=model, allow_random=allow_random)
-        # determined on first embed or provided via args/env
-        try:
-            self.embedding_dim: Optional[int] = int(embedding_dim) if embedding_dim is not None else (int(os.getenv("EMBEDDING_DIM")) if os.getenv("EMBEDDING_DIM") else None)
-        except Exception:
-            self.embedding_dim = embedding_dim
 
         self.stats = {
             "panels_created": 0,
@@ -152,7 +139,6 @@ class ACRACBuilder:
             "scenarios_created": 0,
             "procedures_created": 0,
             "recommendations_created": 0,
-            "vectors_generated": 0,
             "errors": [],
         }
 
@@ -160,21 +146,66 @@ class ACRACBuilder:
         self.cache = {"panels": {}, "topics": {}, "scenarios": {}, "procedures": {}}  # name_key -> semantic_id
 
     # ------------- DB helpers -------------
+    def check_and_create_database(self) -> bool:
+        """检查数据库是否存在，如果不存在则创建"""
+        try:
+            # 连接到默认的 postgres 数据库来检查目标数据库是否存在
+            temp_config = self.db_config.copy()
+            target_db = temp_config["database"]
+            temp_config["database"] = "postgres"  # 连接到 postgres 数据库
+
+            temp_conn = psycopg2.connect(**temp_config)
+            temp_conn.autocommit = True  # 创建数据库需要 autocommit
+            temp_cursor = temp_conn.cursor()
+
+            # 检查数据库是否存在
+            temp_cursor.execute(
+                "SELECT 1 FROM pg_database WHERE datname = %s",
+                (target_db,)
+            )
+            exists = temp_cursor.fetchone() is not None
+
+            if not exists:
+                logger.info(f"Database '{target_db}' does not exist. Creating...")
+                temp_cursor.execute(f'CREATE DATABASE "{target_db}"')
+                logger.info(f"Database '{target_db}' created successfully")
+            else:
+                logger.info(f"Database '{target_db}' already exists")
+
+            temp_cursor.close()
+            temp_conn.close()
+            return True
+        except Exception as e:
+            logger.error(f"Check/create database failed: {e}")
+            return False
+
+    def check_tables_exist(self) -> bool:
+        """检查表是否已经存在并且有数据"""
+        try:
+            self.cursor.execute(
+                """
+                SELECT COUNT(*) FROM information_schema.tables
+                WHERE table_schema = 'public' AND table_name = 'panels'
+                """
+            )
+            table_exists = self.cursor.fetchone()[0] > 0
+
+            if table_exists:
+                self.cursor.execute("SELECT COUNT(*) FROM panels")
+                data_exists = self.cursor.fetchone()[0] > 0
+                return data_exists
+            return False
+        except Exception as e:
+            logger.warning(f"Check tables exist failed: {e}")
+            return False
+
     def connect(self) -> bool:
         try:
             self.conn = psycopg2.connect(**self.db_config)
             self.cursor = self.conn.cursor()
-            # Smoke-test the connection first
+            # Smoke-test the connection
             self.cursor.execute("SELECT 1")
             self.cursor.fetchone()
-            # 尝试注册 pgvector 适配器；若扩展尚未创建，则记录警告但不中断
-            if PGVECTOR_AVAILABLE:
-                try:
-                    register_vector(self.conn)
-                except Exception as ve:
-                    logger.warning(
-                        "pgvector extension not available yet during connect(): %s", ve
-                    )
             return True
         except Exception as e:
             logger.error(f"DB connect failed: {e}")
@@ -189,12 +220,6 @@ class ACRACBuilder:
     # ------------- Schema -------------
     def create_schema(self) -> bool:
         try:
-            self.cursor.execute("CREATE EXTENSION IF NOT EXISTS vector;")
-            if PGVECTOR_AVAILABLE:
-                try:
-                    register_vector(self.conn)
-                except Exception as ve:
-                    logger.warning(f"register_vector failed after enabling vector extension: {ve}")
             # Drop in dependency order
             self.cursor.execute("DROP TABLE IF EXISTS vector_search_logs CASCADE;")
             self.cursor.execute("DROP TABLE IF EXISTS data_update_history CASCADE;")
@@ -204,11 +229,8 @@ class ACRACBuilder:
             self.cursor.execute("DROP TABLE IF EXISTS topics CASCADE;")
             self.cursor.execute("DROP TABLE IF EXISTS panels CASCADE;")
 
-            # Embedding dimension: use provided/detected value; fallback to 1024
-            dim = self.embedding_dim or 1024
-
             self.cursor.execute(
-                f"""
+                """
                 CREATE TABLE panels (
                     id SERIAL PRIMARY KEY,
                     semantic_id VARCHAR(20) UNIQUE NOT NULL,
@@ -217,14 +239,13 @@ class ACRACBuilder:
                     description TEXT,
                     is_active BOOLEAN DEFAULT TRUE,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    embedding VECTOR({dim})
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
                 """
             )
 
             self.cursor.execute(
-                f"""
+                """
                 CREATE TABLE topics (
                     id SERIAL PRIMARY KEY,
                     semantic_id VARCHAR(20) UNIQUE NOT NULL,
@@ -234,14 +255,13 @@ class ACRACBuilder:
                     description TEXT,
                     is_active BOOLEAN DEFAULT TRUE,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    embedding VECTOR({dim})
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
                 """
             )
 
             self.cursor.execute(
-                f"""
+                """
                 CREATE TABLE clinical_scenarios (
                     id SERIAL PRIMARY KEY,
                     semantic_id VARCHAR(20) UNIQUE NOT NULL,
@@ -259,14 +279,13 @@ class ACRACBuilder:
                     symptom_category VARCHAR(100),
                     is_active BOOLEAN DEFAULT TRUE,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    embedding VECTOR({dim})
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
                 """
             )
 
             self.cursor.execute(
-                f"""
+                """
                 CREATE TABLE procedure_dictionary (
                     id SERIAL PRIMARY KEY,
                     semantic_id VARCHAR(20) UNIQUE NOT NULL,
@@ -285,14 +304,13 @@ class ACRACBuilder:
                     description_zh TEXT,
                     is_active BOOLEAN DEFAULT TRUE,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    embedding VECTOR({dim})
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
                 """
             )
 
             self.cursor.execute(
-                f"""
+                """
                 CREATE TABLE clinical_recommendations (
                     id SERIAL PRIMARY KEY,
                     semantic_id VARCHAR(50) UNIQUE NOT NULL,
@@ -319,19 +337,17 @@ class ACRACBuilder:
                     is_active BOOLEAN DEFAULT TRUE,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    embedding VECTOR({dim}),
                     UNIQUE(scenario_id, procedure_id)
                 );
                 """
             )
 
             self.cursor.execute(
-                f"""
+                """
                 CREATE TABLE vector_search_logs (
                     id SERIAL PRIMARY KEY,
                     query_text TEXT NOT NULL,
                     query_type VARCHAR(50),
-                    search_vector VECTOR({dim}),
                     results_count INTEGER,
                     search_time_ms INTEGER,
                     user_id INTEGER,
@@ -380,45 +396,10 @@ class ACRACBuilder:
                     logger.warning(f"Index creation warning: {e}")
 
             self.conn.commit()
+            logger.info("Schema created successfully (without embedding columns)")
             return True
         except Exception as e:
             logger.error(f"Create schema failed: {e}")
-            self.conn.rollback()
-            return False
-
-    def create_vector_indexes(self) -> bool:
-        try:
-            # Increase memory for index build to reduce failures on larger lists
-            # Use a conservative value that typically fits local setups. Users can tune as needed.
-            try:
-                self.cursor.execute("SET maintenance_work_mem = '256MB';")
-            except Exception as e:
-                logger.warning(f"SET maintenance_work_mem failed: {e}")
-
-            # 仅为 clinical_scenarios 创建向量索引
-            logger.info("仅为 clinical_scenarios 创建向量索引...")
-            try:
-                sql = (
-                    "CREATE INDEX IF NOT EXISTS idx_scenarios_embedding ON clinical_scenarios "
-                    "USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);"
-                )
-                self.cursor.execute(sql)
-                self.conn.commit()
-                logger.info("clinical_scenarios 向量索引创建成功")
-            except Exception as e:
-                logger.warning(f"Vector index creation warning on clinical_scenarios: {e}")
-                self.conn.rollback()
-
-            try:
-                self.cursor.execute("ANALYZE clinical_scenarios;")
-                self.cursor.execute("SET ivfflat.probes = 10;")
-                self.conn.commit()
-            except Exception as e:
-                logger.warning(f"Post-index analyze/probes setup warning: {e}")
-                self.conn.rollback()
-            return True
-        except Exception as e:
-            logger.error(f"Create vector indexes failed: {e}")
             self.conn.rollback()
             return False
 
@@ -846,53 +827,6 @@ class ACRACBuilder:
             self.conn.commit()
         self.stats['recommendations_created'] += len(rows)
 
-    # ------------- Embeddings -------------
-    def _update_embeddings(self, table: str, id_col: str, text_build_fn, batch: int = 64):
-        self.cursor.execute(f"SELECT id FROM {table};")
-        ids = [r[0] for r in self.cursor.fetchall()]
-        if not ids:
-            return
-        texts: List[str] = []
-        idx_map: List[int] = []
-        for pk in ids:
-            txt = text_build_fn(pk)
-            texts.append(txt)
-            idx_map.append(pk)
-        embs = self.embedder.embed_texts(texts, batch_size=batch)
-        if embs and self.embedding_dim is None:
-            self.embedding_dim = len(embs[0])
-        # 批量更新向量
-        for i, (emb, pk) in enumerate(zip(embs, idx_map)):
-            self.cursor.execute(f"UPDATE {table} SET embedding = %s WHERE id = %s;", (emb, pk))
-            if i % 100 == 0:  # 每100条提交一次
-                self.conn.commit()
-        self.conn.commit()
-        self.stats['vectors_generated'] += len(embs)
-
-    def generate_all_embeddings(self):
-        # 暂时只为 clinical_scenarios 生成 embedding
-        # 其他表(panels, topics, procedures, recommendations)暂不生成向量
-        logger.info("仅为 clinical_scenarios 生成 embedding，其他表暂时跳过...")
-        
-        # scenarios (仅包含 panel, topic 和 description_zh,其他结构化信息通过规则过滤)
-        def scenario_text(pk: int) -> str:
-            self.cursor.execute(
-                """
-                SELECT s.description_zh, p.name_zh, t.name_zh
-                FROM clinical_scenarios s
-                JOIN topics t ON s.topic_id = t.id
-                JOIN panels p ON s.panel_id = p.id
-                WHERE s.id = %s
-                """,
-                (pk,),
-            )
-            (d_zh, p_zh, t_zh) = self.cursor.fetchone()
-            # 简化的 embedding 文本:仅核心语义信息
-            return f"科室: {p_zh} | 主题: {t_zh} | 临床场景: {d_zh}"
-
-        self._update_embeddings("clinical_scenarios", "id", scenario_text)
-        logger.info(f"已为 {self.stats['vectors_generated']} 个临床场景生成向量")
-
     # ------------- Inference helpers -------------
     def _infer_procedure_attributes(self, text: str) -> Dict[str, Any]:
         t = (text or "").upper()
@@ -974,9 +908,6 @@ class ACRACBuilder:
         for t in tables:
             self.cursor.execute(f"SELECT COUNT(*) FROM {t};")
             info[f"{t}_count"] = self.cursor.fetchone()[0]
-            self.cursor.execute(f"SELECT COUNT(embedding) FROM {t};")
-            with_emb = self.cursor.fetchone()[0]
-            info[f"{t}_embedding_coverage"] = with_emb
         self.cursor.execute(
             """
             SELECT COUNT(*) FROM clinical_recommendations cr
@@ -989,45 +920,44 @@ class ACRACBuilder:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Build/verify ACRAC DB with SiliconFlow embeddings")
+    parser = argparse.ArgumentParser(description="Build/verify ACRAC DB (PostgreSQL without embeddings)")
     parser.add_argument("action", choices=["build", "verify", "rebuild"], help="Action to perform")
     parser.add_argument("--csv-file", default="../../ACR_data/ACR_final.csv", help="Path to CSV data file")
-    parser.add_argument("--api-key", default="", help="SiliconFlow API key (optional; otherwise use env SILICONFLOW_API_KEY)")
-    parser.add_argument("--model", default="BAAI/bge-m3", help="SiliconFlow embedding model id")
     parser.add_argument("--skip-schema", action="store_true", help="Skip schema creation (for incremental runs)")
-    parser.add_argument("--allow-random", action="store_true", help="Allow random embeddings if API key missing (not recommended)")
-    parser.add_argument("--embedding-dim", type=int, default=None, help="Embedding vector dimension; if omitted, uses EMBEDDING_DIM env or detects from model")
     args = parser.parse_args()
 
-    # If passed explicitly, set env as well
-    if args.api_key:
-        os.environ.setdefault("SILICONFLOW_API_KEY", args.api_key)
-    os.environ.setdefault("SILICONFLOW_EMBEDDING_MODEL", args.model)
+    builder = ACRACBuilder()
 
-    builder = ACRACBuilder(
-        api_key=args.api_key or os.getenv("SILICONFLOW_API_KEY"),
-        model=args.model,
-        allow_random=args.allow_random or os.getenv("ALLOW_RANDOM_EMBEDDINGS","false").lower()=="true",
-        embedding_dim=args.embedding_dim
-    )
-    if not builder.connect():
-        return 1
     try:
         if args.action in ["build", "rebuild"]:
+            # 首先检查并创建数据库
+            logger.info("Checking database existence...")
+            if not builder.check_and_create_database():
+                logger.error("Failed to check/create database")
+                return 1
+
+            # 连接到目标数据库
+            if not builder.connect():
+                return 1
+
+            # 检查表和数据是否已存在
             if not args.skip_schema:
-                # Detect embedding dimension if not specified
-                if builder.embedding_dim is None:
-                    try:
-                        probe = builder.embedder.embed_texts(["dimension_probe"]) or []
-                        if probe and isinstance(probe[0], list):
-                            builder.embedding_dim = len(probe[0])
-                            os.environ.setdefault("EMBEDDING_DIM", str(builder.embedding_dim))
-                            logger.info(f"Detected embedding dimension: {builder.embedding_dim}")
-                    except Exception as de:
-                        logger.warning(f"Embedding dimension detection failed, fallback to 1024: {de}")
-                logger.info(f"Creating schema (dim={builder.embedding_dim or 1024})...")
+                data_exists = builder.check_tables_exist()
+                if data_exists:
+                    logger.warning("Tables and data already exist. Skipping data import.")
+                    logger.info("If you want to rebuild, please use 'rebuild' action or manually drop the tables.")
+                    info = builder.verify()
+                    logger.info(f"Current data verification: {info}")
+                    return 0
+
+                logger.info("Creating schema (without embeddings)...")
                 if not builder.create_schema():
                     return 1
+            else:
+                # 如果跳过 schema 创建，仍需要连接
+                if not builder.connect():
+                    return 1
+
             logger.info("Loading CSV...")
             df = builder.load_csv(args.csv_file)
             logger.info("Preprocessing...")
@@ -1042,14 +972,13 @@ def main():
             builder.build_procedures(data['procedures'])
             logger.info("Building recommendations...")
             builder.build_recommendations(data['recommendations'])
-            logger.info("Generating embeddings via SiliconFlow...")
-            builder.generate_all_embeddings()
-            logger.info("Creating vector indexes...")
-            builder.create_vector_indexes()
             logger.info("Verifying build...")
             info = builder.verify()
             logger.info(f"Build verification: {info}")
+            logger.info("PostgreSQL data created successfully. Note: Vectors will be stored in Milvus separately.")
         elif args.action == "verify":
+            if not builder.connect():
+                return 1
             info = builder.verify()
             logger.info(f"Verification: {info}")
     finally:

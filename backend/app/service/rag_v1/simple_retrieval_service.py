@@ -14,7 +14,7 @@ from app.service.rag_v1.vector_database_service import VectorDatabaseService
 from app.utils.helper.helper import assemble_database_results, safe_parse_llm_response, \
     safe_process_recommendation_grades
 from app.utils.logger.simple_logger import get_logger
-import qwen_token_counter
+import dashscope
 logger=get_logger(__name__)
 
 class SimpleRetrievalService:
@@ -36,7 +36,7 @@ class SimpleRetrievalService:
         self.vector_service = vector_service
         self.redis_client = redis_manager.async_client
         self.adaptive_recommendation_engine_service = AdaptiveRecommendationEngineService(environment="production")
-
+        self.tokenizer=dashscope.get_tokenizer("qwen-7b-chat")
         # 性别映射
         self.gender_mapping = {
             '男性': [
@@ -139,7 +139,8 @@ class SimpleRetrievalService:
         """
         return async_db_manager.async_session_factory()
 
-    async def simple_rank_all_scenarios(self, all_scenarios, patient_info, clinical_context, strategy, min_rating, direct_return,
+    async def simple_rank_all_scenarios(self,
+                                        all_scenarios, patient_info, clinical_context, strategy, min_rating, direct_return,
                                         max_scenarios, max_recommendations_per_scenario):
 
         """
@@ -929,7 +930,7 @@ class SimpleRetrievalService:
             keyword_score = item.get('jieba_score')
 
             # 3. 结构化匹配
-            structure_score = self._calculate_structure_match(scenario, patient_info)
+            structure_score = self._calculate_structure_match(scenario, patient_info,)
 
             # 4. 临床优先级
             priority_score = self._calculate_priority(scenario, clinical_context)
@@ -1709,7 +1710,8 @@ class SimpleRetrievalService:
         try:
             # 单次LLM调用
             response = await self.ai_service._call_llm(prompt)
-
+            if direct_return:
+                return response
             # 解析JSON结果
             import re
             import json
@@ -1727,13 +1729,13 @@ class SimpleRetrievalService:
 
             # 处理选中的场景和分级推荐
             selected_scenarios_data = result.get('selected_scenarios', [])
+            overall_choices=result.get("overall_choices",[])
             final_results = []
 
             for selected_data in selected_scenarios_data:
                 scenario_index = selected_data.get('scenario_index')
                 scenario_id = selected_data.get('scenario_id')
                 grading_data = selected_data.get('recommendation_grades', {})
-                final_choices = selected_data.get("final_choices", [])
                 # 验证场景索引
                 if not (1 <= scenario_index <= len(filter_scenario_with_recommendations)):
                     logger.warning(f"无效的场景索引: {scenario_index}")
@@ -1751,7 +1753,8 @@ class SimpleRetrievalService:
                     'comprehensive_score': selected_data.get('comprehensive_score', 0),
                     'scenario_reasoning': selected_data.get('scenario_reasoning', ''),
                     'grading_reasoning': selected_data.get('grading_reasoning', ''),
-                    'overall_reasoning': result.get('overall_reasoning', ''),
+
+
                     'graded_recommendations': graded_recommendations,
                     'recommendation_summary': {
                         'highly_recommended_count': len(graded_recommendations['highly_recommended']),
@@ -1759,7 +1762,6 @@ class SimpleRetrievalService:
                         'less_recommended_count': len(graded_recommendations['less_recommended']),
                         'total_recommendations': len(original_recommendations)
                     },
-                    "final_choices": final_choices,
                     'scenario_metadata': {
                         'scenario_id': scenario_id or scenario.semantic_id,
                         'description': scenario.description_zh,
@@ -1788,12 +1790,13 @@ class SimpleRetrievalService:
                     f"不太:{summary['less_recommended_count']}]"
                 )
 
-            return final_results
+            return {"result":final_results,"overall_choices":overall_choices, 'overall_reasoning': result.get('overall_reasoning', '')}
 
         except Exception as e:
-            logger.error(f"❌ 综合场景分级筛选失败: {str(e)}", exc_info=True)
-            return self._fallback_comprehensive_selection_with_grading(filter_scenario_with_recommendations, max_scenarios, patient_info)
-
+            if not direct_return:
+                logger.error(f"❌ 综合场景分级筛选失败: {str(e)}", exc_info=True)
+                return self._fallback_comprehensive_selection_with_grading(filter_scenario_with_recommendations, max_scenarios, patient_info)
+            return "出错了，请联系管理人员"
     def _build_comprehensive_prompt_with_grading(
             self,
             all_scenarios: List[Dict[str, Any]],
@@ -1806,17 +1809,17 @@ class SimpleRetrievalService:
         """构建完整的提示词，确保总token数不超过3600"""
         # 构建各个部分
         try:
-                import qwen_token_counter
+
                 patient_info_content = self.build_patient_context(patient_info)
                 clinical_context_content = self.build_clinical_context(clinical_context)
 
                 # 计算固定部分的token数
                 fixed_parts = patient_info_content + clinical_context_content
-                fixed_tokens = qwen_token_counter.get_token_count(fixed_parts)
+                fixed_tokens = len(self.tokenizer.encode(fixed_parts))
 
                 # 为任务指令预留空间（估计约500-800 token）
                 task_reserve_tokens = 900
-                available_scenario_tokens = self.adaptive_recommendation_engine_service.strategy.threshold_config["token_threshold"]-800 - fixed_tokens - task_reserve_tokens
+                available_scenario_tokens = self.adaptive_recommendation_engine_service.strategy.threshold_config["token_threshold"]-1000 - fixed_tokens - task_reserve_tokens
                 logger.info(f"可用的提示词token数{available_scenario_tokens}")
                 # 构建场景内容，限制在可用token数内
                 scenarios_content = self.build_scenarios_with_recommend(
@@ -1841,9 +1844,9 @@ class SimpleRetrievalService:
                 )
 
                 # 最终token计数验证
-                total_tokens = qwen_token_counter.get_token_count(comprehensive_prompt)
+                total_tokens = len(self.tokenizer.encode(comprehensive_prompt))
                 if total_tokens > self.adaptive_recommendation_engine_service.strategy.threshold_config["token_threshold"]-800:
-                    logger.info(f"仍然超出{4096-800-total_tokens}个token,进行截断")
+                    logger.info(f"仍然超出{4096-1000-total_tokens}个token,进行截断")
                     # 如果仍然超出，进一步截断场景部分
                     scenarios_content = self._truncate_scenarios_further(scenarios_content,
                                                                          available_scenario_tokens - fixed_tokens - task_reserve_tokens)
@@ -1864,7 +1867,7 @@ class SimpleRetrievalService:
 
     def _truncate_scenarios_further(self, scenarios_content: str, max_tokens: int) -> str:
         """进一步截断场景内容"""
-        current_tokens = qwen_token_counter.get_token_count(scenarios_content)
+        current_tokens = len(self.tokenizer.encode(scenarios_content))
         if current_tokens <= max_tokens:
             return scenarios_content
 
@@ -1884,7 +1887,7 @@ class SimpleRetrievalService:
 
             # 添加截断提示
             scenarios_content += "\n\n<!-- 由于token限制，部分场景未显示 -->\n"
-            current_tokens = qwen_token_counter.get_token_count(scenarios_content)
+            current_tokens = len(self.tokenizer.encode(scenarios_content))
 
         return scenarios_content
 
@@ -1931,12 +1934,15 @@ class SimpleRetrievalService:
         """
         # 添加临床关键点提取
         key_clinical_points = []
-        if '急性' in clinical_context.chief_complaint or '急诊' in clinical_context.department:
-            key_clinical_points.append("🔴 急性病程：需快速诊断")
-        if '外伤' in clinical_context.chief_complaint:
-            key_clinical_points.append("🟡 外伤相关：关注结构性损伤")
-        if '肿瘤' in clinical_context.diagnosis or '占位' in clinical_context.diagnosis:
-            key_clinical_points.append("🔵 肿瘤评估：需要精确分期")
+        if clinical_context.department:
+            if '急性' in clinical_context.chief_complaint or '急诊' in clinical_context.department:
+                key_clinical_points.append("🔴 急性病程：需快速诊断")
+        if clinical_context.chief_complaint:
+            if '外伤' in clinical_context.chief_complaint:
+                key_clinical_points.append("🟡 外伤相关：关注结构性损伤")
+        if clinical_context.diagnosis:
+            if '肿瘤' in clinical_context.diagnosis or '占位' in clinical_context.diagnosis:
+                key_clinical_points.append("🔵 肿瘤评估：需要精确分期")
 
         if key_clinical_points:
             clinical_content += f"\n### 临床特征\n" + "\n".join(f"- {point}" for point in key_clinical_points)
@@ -1949,7 +1955,7 @@ class SimpleRetrievalService:
         scenarios_text = "## 可选临床场景及推荐项目\n\n"
 
         # 计算初始token数
-        total_tokens = qwen_token_counter.get_token_count(scenarios_text)
+        total_tokens = len(self.tokenizer.encode(scenarios_text))
         scenarios_added = 0
         recommendations_added = 0
 
@@ -2033,7 +2039,7 @@ class SimpleRetrievalService:
             current_scenario_text += "---\n\n"
 
             # 计算当前场景的总token数
-            current_scenario_tokens = qwen_token_counter.get_token_count(current_scenario_text)
+            current_scenario_tokens = len(self.tokenizer.encode((current_scenario_text)))
 
             # 检查添加整个场景后是否会超过限制
             if total_tokens + current_scenario_tokens <= max_tokens:
@@ -2058,7 +2064,7 @@ class SimpleRetrievalService:
     def build_task_instruction(self, direct_return:bool,max_scenarios: int,
                                max_recommendations_per_scenario: int):
         """构建任务指令"""
-        if direct_return:
+        if not direct_return:
             task_instruction = f"""
     
             ## 🎯 任务目标
@@ -2127,7 +2133,6 @@ class SimpleRetrievalService:
                             "recommended": [3],
                             "less_recommended": [4, 5]
                         }},
-                        "final_choices": [该场景下针对该患者的最佳推荐项目，注意！填推荐项目的名字，且推荐项目名字必须为{max_recommendations_per_scenario}个！],
                         "grading_reasoning": "CT平扫ACR评分9分，对急腹症诊断价值最高；超声无辐射，适合初步筛查"
                     }},
                     {{
@@ -2140,10 +2145,10 @@ class SimpleRetrievalService:
                                       "recommended": [2, 4],
                                       "less_recommended": [5]
                                   }},
-                        "final_choices":[该场景下针对该患者的最佳推荐项目，注意！填推荐项目的名字，且推荐项目名字必须为{max_recommendations_per_scenario}个！]
                         "grading_reasoning": "分级临床理由"
                               }},
                 ],
+                "overall_choices":[这是总体的选择项目，注意！填推荐项目的名字,要求你综合性的考量之后，选择最符合患者信息和临床场景的推荐项目！必须为{max_recommendations_per_scenario}个]
                 "overall_reasoning": "总体选择策略，重点说明安全性考量和诊断路径"
             }}
              **重要：

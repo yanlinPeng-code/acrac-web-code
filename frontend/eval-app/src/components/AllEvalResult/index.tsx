@@ -2,18 +2,19 @@
  * 所有接口并发评测结果展示组件
  */
 
-import { Card, Table, Tabs, Row, Col, Statistic, Space, Typography, Alert } from "antd"
+import { Card, Table, Row, Col, Statistic, Space, Typography, Alert, Tabs } from "antd"
 import {
   ClockCircleOutlined,
   CheckCircleOutlined,
   ApiOutlined,
-  FileTextOutlined,
   ThunderboltOutlined,
   CloseCircleOutlined,
+  BarChartOutlined,
 } from "@ant-design/icons"
 import type { ColumnsType } from "antd/es/table"
-import type { AllEvaluationData, EvaluationDetail } from "../../types/evaluation"
-import { formatPercentage, formatRecommendations, formatScenarioHits } from "../../utils/format"
+import type { AllEvaluationData, EndpointSummary } from "../../types/evaluation"
+import { formatPercentage } from "../../utils/format"
+import VChartComparison from "../VChartComparison"
 
 const { Text } = Typography
 
@@ -23,21 +24,167 @@ interface AllEvalResultProps {
 }
 
 export default function AllEvalResult({ result, clientLatency }: AllEvalResultProps) {
-  // 明细表列定义
-  const detailColumns: ColumnsType<EvaluationDetail> = [
+  // 如果有新的endpoint_summary数据，则显示它（Sheet 5数据）
+  if (result.endpoint_summary && result.endpoint_summary.length > 0) {
+    const summaryColumns: ColumnsType<EndpointSummary> = [
+      {
+        title: "接口名称",
+        dataIndex: "api_name",
+        key: "api_name",
+        width: 250,
+      },
+      {
+        title: "Top1命中数",
+        dataIndex: "top1_hit_count",
+        key: "top1_hit_count",
+        width: 120,
+      },
+      {
+        title: "Top3命中数",
+        dataIndex: "top3_hit_count",
+        key: "top3_hit_count",
+        width: 120,
+      },
+      {
+        title: "Top1准确率",
+        dataIndex: "top1_accuracy",
+        key: "top1_accuracy",
+        width: 120,
+        render: (value: number) => formatPercentage(value),
+      },
+      {
+        title: "Top3准确率",
+        dataIndex: "top3_accuracy",
+        key: "top3_accuracy",
+        width: 120,
+        render: (value: number) => formatPercentage(value),
+      },
+      {
+        title: "平均响应时间(ms)",
+        dataIndex: "avg_response_time_ms",
+        key: "avg_response_time_ms",
+        width: 150,
+      },
+      {
+        title: "总耗时(ms)",
+        dataIndex: "total_time_ms",
+        key: "total_time_ms",
+        width: 120,
+      },
+    ]
+
+    return (
+      <Space direction="vertical" size="large" style={{ width: "100%" }}>
+        <Row gutter={[16, 16]}>
+          <Col xs={24} sm={12} lg={6}>
+            <Card>
+              <Statistic
+                title="端到端耗时"
+                value={clientLatency ?? 0}
+                suffix="ms"
+                prefix={<ClockCircleOutlined />}
+              />
+            </Card>
+          </Col>
+
+          <Col xs={24} sm={12} lg={6}>
+            <Card>
+              <Statistic
+                title="测试接口数"
+                value={result.endpoint_summary.length}
+                prefix={<ApiOutlined />}
+              />
+            </Card>
+          </Col>
+
+          <Col xs={24} sm={12} lg={6}>
+            <Card>
+              <Statistic
+                title="平均Top1准确率"
+                value={formatPercentage(
+                  result.endpoint_summary.reduce((sum, item) => sum + item.top1_accuracy, 0) /
+                  result.endpoint_summary.length
+                )}
+                valueStyle={{ color: "#3f8600" }}
+                prefix={<CheckCircleOutlined />}
+              />
+            </Card>
+          </Col>
+
+          <Col xs={24} sm={12} lg={6}>
+            <Card>
+              <Statistic
+                title="平均响应时间"
+                value={Math.round(
+                  result.endpoint_summary.reduce((sum, item) => sum + item.avg_response_time_ms, 0) /
+                  result.endpoint_summary.length
+                )}
+                suffix="ms"
+                prefix={<ThunderboltOutlined />}
+              />
+            </Card>
+          </Col>
+        </Row>
+
+        <Card title="接口评测结果对比">
+          <Tabs
+            defaultActiveKey="table"
+            items={[
+              {
+                key: 'table',
+                label: (
+                  <span>
+                    <ApiOutlined />
+                    数据表格
+                  </span>
+                ),
+                children: (
+                  <Table
+                    dataSource={result.endpoint_summary}
+                    columns={summaryColumns}
+                    pagination={false}
+                    rowKey="api_name"
+                    scroll={{ x: 'max-content' }}
+                  />
+                )
+              },
+              {
+                key: 'vchart',
+                label: (
+                  <span>
+                    <BarChartOutlined />
+                    可视化图表
+                  </span>
+                ),
+                children: <VChartComparison data={result.endpoint_summary} />
+              }
+            ]}
+          />
+        </Card>
+      </Space>
+    )
+  }
+
+  // 兼容旧的endpoint_results数据格式
+  if (!result.endpoint_results || !result.summary) {
+    return (
+      <Alert
+        message="暂无评测结果"
+        description="评测结果数据格式不正确"
+        type="warning"
+        showIcon
+      />
+    )
+  }
+
+  // 原有的详细展示逻辑（保留以兼容旧版本）
+  const detailColumns: ColumnsType<any> = [
     { title: "临床场景", dataIndex: "clinical_scenario", width: 300 },
     { title: "标准答案", dataIndex: "standard_answer", width: 150 },
     {
       title: "推荐",
       dataIndex: "recommendations",
       width: 250,
-      render: (v: any) => formatRecommendations(v),
-    },
-    {
-      title: "逐场景命中",
-      dataIndex: "per_scenario_hits",
-      width: 120,
-      render: (v: number[]) => formatScenarioHits(v),
     },
     {
       title: "命中",

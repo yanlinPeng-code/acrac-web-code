@@ -1,605 +1,750 @@
-from typing import Optional, List, Dict, Any, Tuple
+
+import asyncio
 import io
 import json
-import re
-import pandas as pd
-import httpx
-import asyncio
-from concurrent.futures import ThreadPoolExecutor
+import random
+import time
 from datetime import datetime
-import os
+from typing import List, Dict, Any, Optional, Tuple
 
-from app.schema.IntelligentRecommendation_schemas import (
-    PatientInfo,
-    ClinicalContext,
-    RetrievalRequest,
-)
+import aiohttp
+import numpy as np
+import pandas as pd
 
-
-def normalize_text(text: Optional[str]) -> str:
-    """安全去空与去首尾空白，用于统一比较与显示。"""
-    return (text or "").strip()
-
-
-def extract_final_choices(best_recommendations: Any) -> List[List[str]]:
-    """从推荐接口返回结构中提取每个场景的 final_choices 列表。"""
-    if not isinstance(best_recommendations, list):
-        return []
-    results: List[List[str]] = []
-    for scene in best_recommendations:
-        if isinstance(scene, dict):
-            choices = scene.get("final_choices")
-            if isinstance(choices, list):
-                results.append([c for c in choices if isinstance(c, str)])
-            else:
-                results.append([])
-        else:
-            results.append([])
-    return results
-
-
-def extract_recommendations_by_endpoint(endpoint: str, response_data: Dict[str, Any]) -> List[List[str]]:
-    """根据不同接口从响应中提取推荐结果"""
-    if endpoint in ["recommend", "recommend-simple"]:
-        # 从best_recommendations提取final_choices
-        return extract_final_choices(response_data.get("best_recommendations", []))
-
-    elif endpoint == "intelligent-recommendation":
-        # intelligent-recommendation接口的数据结构
-        llm_recs = response_data.get("llm_recommendations", {})
-        if llm_recs:
-            recommendations = llm_recs.get("recommendations", [])
-            # 提取procedure_name作为推荐项目
-            return [[rec.get("procedure_name", "") for rec in recommendations if rec.get("procedure_name")]]
-        return []
-
-    elif endpoint == "recommend_item_with_reason":
-        # recommend_item_with_reason是流式接口，返回的check_item_name
-        # 这里假设已经处理完流式数据
-        if "check_item_names" in response_data:
-            return [response_data["check_item_names"]]
-        return []
-
-    return []
-
-
-def is_gold_hit_in_choices(choices: List[str], gold_answer: str) -> int:
-    """判断标准答案是否命中于某个场景的推荐集合（final_choices）。"""
-    gold = normalize_text(gold_answer)
-    if not gold:
-        return 0
-    normalized = [normalize_text(x) for x in choices]
-    return 1 if gold in normalized else 0
-
-
-# 为兼容性添加_hit别名
-_hit = is_gold_hit_in_choices
+from backend.app.entity.eval_entity import EVAL_CONFIG
+from backend.app.schema.IntelligentRecommendation_schemas import SearchStrategy
+from backend.app.schema.eval_schema import EvalParams
+from backend.app.schema.judge_schemas import JudgeRequest
+from backend.app.service.eval_v1.judge_service import JudgeService
 
 
 class EvaluationService:
     """评测服务：通过 HTTP 直连被测后端 URL，执行推荐接口并统计命中率。"""
 
-    def __init__(self):
-        pass
+    def __init__(self, max_concurrent_per_endpoint: int = 5):
+        self.eval_config = EVAL_CONFIG
+        self.judge_service = JudgeService()
+        self.max_concurrent_per_endpoint = max_concurrent_per_endpoint  # 每个接口的并发数
 
-    async def post_recommendation_request(self, server_url: str, endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """调用被测后端的推荐接口并返回 Data 节点内容。"""
-        # 构建完整URL
-        if endpoint == "recommend":
-            url = server_url.rstrip("/") + "/api/v1/acrac-code/recommend"
-        elif endpoint == "recommend-simple":
-            url = server_url.rstrip("/") + "/api/v1/acrac-code/simple-recommend"
-        elif endpoint == "intelligent-recommendation":
-            url = server_url.rstrip("/") + "/api/v1/acrac/rag-llm/intelligent-recommendation"
-        elif endpoint == "recommend_item_with_reason":
-            url = server_url.rstrip("/") + "/rimagai/checkitem/recommend_item_with_reason"
+    def _calculate_endpoint_statistics(self, result_df_data: List[Dict[str, Any]], endpoint_name: str = "") -> Dict[str, Any]:
+        """计算接口统计数据的公共方法（去除冗余）"""
+        if not result_df_data:
+            return {
+                'api_name': endpoint_name,
+                'top1_hit_count': 0,
+                'top3_hit_count': 0,
+                'top1_accuracy': 0.0,
+                'top3_accuracy': 0.0,
+                'avg_response_time_ms': 0.0,
+                'total_time_ms': 0.0,
+                'total_samples': 0,
+                'total_rows': 0,
+                'invalid_samples': 0
+            }
+
+        df_temp = pd.DataFrame(result_df_data)
+
+        # 只统计有效样本（is_valid_sample 为 True）
+        if 'is_valid_sample' in df_temp.columns:
+            valid_df = df_temp[df_temp['is_valid_sample'] == True]
         else:
-            raise ValueError(f"Unsupported endpoint: {endpoint}")
+            valid_df = df_temp
 
-        async with httpx.AsyncClient(timeout=60) as client:
-            response = await client.post(url, json=payload)
-            response.raise_for_status()
-            body = response.json()
+        total_samples = len(valid_df)  # 有效样本数
+        total_rows = len(df_temp)  # 总行数
+        invalid_samples = total_rows - total_samples
 
-        # 根据不同接口返回不同的数据结构
-        if endpoint in ["recommend", "recommend-simple"]:
-            return body.get("Data", {})
-        elif endpoint == "intelligent-recommendation":
-            return body  # 直接返回整个响应体
-        elif endpoint == "recommend_item_with_reason":
-            # 流式接口需要特殊处理
-            return body
-        return body.get("Data", {})
+        top1_hits = int(valid_df['top1_hit'].sum()) if 'top1_hit' in valid_df.columns and len(valid_df) > 0 else 0
+        top3_hits = int(valid_df['top3_hit'].sum()) if 'top3_hit' in valid_df.columns and len(valid_df) > 0 else 0
+        avg_time = float(valid_df['processing_time_ms'].mean()) if 'processing_time_ms' in valid_df.columns and len(valid_df) > 0 else 0.0
+        total_endpoint_time = float(valid_df['processing_time_ms'].sum()) if 'processing_time_ms' in valid_df.columns else 0.0
 
-    def build_request_payload(
-        self,
-        endpoint: str,
-        scenario_text: str,
-        retrieval: RetrievalRequest,
-        standard_query: Optional[str] = None,
-        patient_info: Optional[str] = None,
-        clinical_context: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """构造被测后端推荐接口的请求载荷。"""
-        if endpoint in ["recommend", "recommend-simple"]:
-            # recommend和recommend-simple接口
-            if patient_info and clinical_context:
-                # 使用提供的patient_info和clinical_context
-                try:
-                    patient_dict = json.loads(patient_info)
-                    clinical_dict = json.loads(clinical_context)
-                except:
-                    patient_dict = PatientInfo().model_dump()
-                    clinical_dict = ClinicalContext(
-                        department="影像科",
-                        chief_complaint=scenario_text,
-                    ).model_dump()
+        return {
+            'api_name': endpoint_name,
+            'top1_hit_count': top1_hits,
+            'top3_hit_count': top3_hits,
+            'top1_accuracy': round(top1_hits / total_samples, 4) if total_samples > 0 else 0.0,
+            'top3_accuracy': round(top3_hits / total_samples, 4) if total_samples > 0 else 0.0,
+            'avg_response_time_ms': round(avg_time, 2),
+            'total_time_ms': round(total_endpoint_time, 2),
+            'total_samples': total_samples,
+            'total_rows': total_rows,
+            'invalid_samples': invalid_samples
+        }
+
+    def _rows_from_excel(self, file_bytes: bytes) -> List[Dict[str, Any]]:
+        """从Excel字节数据中读取行"""
+        try:
+            df = pd.read_excel(io.BytesIO(file_bytes))
+            rows = []
+
+            for _, row in df.iterrows():
+                # 处理过敏史
+                allergies = []
+                if 'allergies' in df.columns and pd.notna(row.get('allergies')):
+                    allergies_str = str(row['allergies'])
+                    allergies = [item.strip() for item in allergies_str.split(',') if item.strip()]
+
+                # 处理合并症
+                comorbidities = []
+                if 'comorbidities' in df.columns and pd.notna(row.get('comorbidities')):
+                    comorbidities_str = str(row['comorbidities'])
+                    comorbidities = [item.strip() for item in comorbidities_str.split(',') if item.strip()]
+
+                rows.append({
+                    "scenario": row.get('scenarios', '') if pd.notna(row.get('scenarios')) else '',
+                    "gold": row.get('gold_answer', '') if pd.notna(row.get('gold_answer')) else '',
+                    "patient_info": {
+                        "age": row.get('age') if pd.notna(row.get('age')) else '',
+                        "gender": row.get('gender') if pd.notna(row.get('gender')) else '',
+                        "pregnancy_status": row.get('pregnancy_status') if pd.notna(
+                            row.get('pregnancy_status')) else '',
+                        "allergies": allergies,
+                        "comorbidities": comorbidities,
+                        "physical_examination": row.get('physical_examination') if pd.notna(
+                            row.get('physical_examination')) else ''
+                    },
+                    "clinical_context": {
+                        "department": row.get('department', '') if pd.notna(row.get('department')) else '',
+                        "chief_complaint": row.get('chief_complaint', '') if pd.notna(
+                            row.get('chief_complaint')) else '',
+                        "medical_history": row.get('medical_history') if pd.notna(row.get('medical_history')) else '',
+                        "present_illness": row.get('present_illness') if pd.notna(row.get('present_illness')) else '',
+                        "diagnosis": row.get('diagnosis') if pd.notna(row.get('diagnosis')) else '',
+                        "symptom_duration": row.get('symptom_duration') if pd.notna(
+                            row.get('symptom_duration')) else '',
+                        "symptom_severity": row.get('symptom_severity') if pd.notna(
+                            row.get('symptom_severity')) else ''
+                    }
+                })
+
+            return rows
+        except Exception as e:
+            print(f"读取Excel失败: {e}")
+            return []
+
+    def _process_gold_field(self, gold: Any) -> List[str]:
+        """处理gold字段，去除*号并包装为列表"""
+        if gold is None:
+            return []
+
+        # 如果是字符串
+        if isinstance(gold, str):
+            # 替换各种分隔符为统一分隔符
+            gold = gold.replace('；', ';').replace('，', ',').replace('、', ',')
+
+            # 去除*号
+            gold = gold.replace('*', '').strip()
+
+            # 按分隔符分割
+            items = []
+            if ';' in gold:
+                items = [item.strip() for item in gold.split(';') if item.strip()]
+            elif ',' in gold:
+                items = [item.strip() for item in gold.split(',') if item.strip()]
             else:
-                patient_dict = PatientInfo().model_dump()
-                clinical_dict = ClinicalContext(
-                    department="影像科",
-                    chief_complaint=scenario_text,
-                ).model_dump()
+                items = [gold] if gold else []
+
+            return items
+
+        # 如果是数字
+        elif isinstance(gold, (int, float)):
+            return [str(gold)]
+
+        # 如果是列表
+        elif isinstance(gold, list):
+            # 处理列表中的每个元素
+            result = []
+            for item in gold:
+                if isinstance(item, str):
+                    result.append(item.replace('*', '').strip())
+                else:
+                    result.append(str(item))
+            return [item for item in result if item]
+
+        # 其他类型转换为字符串
+        else:
+            return [str(gold).replace('*', '').strip()]
+
+    def build_request_payload(self, endpoint: str, text: str, retr: EvalParams,
+                              patient_info: Dict = None, clinical_context: Dict = None,
+                              standard_query: str = "") -> Dict[str, Any]:
+        """根据endpoint构建请求payload"""
+        if endpoint in ["recommend_final_choices", "recommend_simple_final_choices"]:
+            search_strategy = SearchStrategy()
 
             return {
-                "patient_info": patient_dict,
-                "clinical_context": clinical_dict,
-                "search_strategy": None,
-                "retrieval_strategy": retrieval.model_dump(),
-                "direct_return": True,
-                "standard_query": standard_query or "",
+                "patient_info": patient_info or {},
+                "clinical_context": clinical_context or {},
+                "search_strategy": search_strategy.dict(exclude_none=True),
+                "retrieval_strategy": {
+                    "enable_reranking": retr.enable_reranking,
+                    "need_llm_recommendations": retr.need_llm_recommendations,
+                    "apply_rule_filter": retr.apply_rule_filter,
+                    "top_scenarios": retr.top_scenarios,
+                    "top_recommendations_per_scenario": retr.top_recommendations_per_scenario,
+                    "similarity_threshold": retr.similarity_threshold,
+                    "min_appropriateness_rating": retr.min_appropriateness_rating,
+                },
+                "direct_return": False,
+                "standard_query": ""
             }
 
         elif endpoint == "intelligent-recommendation":
-            # intelligent-recommendation接口
             return {
-                "clinical_query": standard_query or scenario_text,
-                "include_raw_data": retrieval.include_raw_data if hasattr(retrieval, 'include_raw_data') else False,
-                "debug_mode": retrieval.debug_mode if hasattr(retrieval, 'debug_mode') else False,
-                "top_scenarios": retrieval.top_scenarios,
-                "top_recommendations_per_scenario": retrieval.top_recommendations_per_scenario,
-                "show_reasoning": retrieval.show_reasoning if hasattr(retrieval, 'show_reasoning') else True,
-                "similarity_threshold": retrieval.similarity_threshold,
-                "compute_ragas": retrieval.compute_ragas if hasattr(retrieval, 'compute_ragas') else False,
-                "ground_truth": retrieval.ground_truth if hasattr(retrieval, 'ground_truth') else "",
+                "clinical_query": text,
+                "include_raw_data": retr.include_raw_data,
+                "debug_mode": retr.debug_mode,
+                "top_scenarios": retr.top_scenarios,
+                "top_recommendations_per_scenario": retr.top_recommendations_per_scenario,
+                "show_reasoning": retr.show_reasoning,
+                "similarity_threshold": 0.4,
+                "compute_ragas": retr.compute_ragas,
+                "ground_truth": retr.ground_truth,
             }
 
-        elif endpoint == "recommend_item_with_reason":
-            # recommend_item_with_reason接口 - 需要从scenario_text中提取信息
-            # 使用正则匹配提取年龄、性别等信息
-            age_match = re.search(r'(\d+)岁', scenario_text)
-            gender_match = re.search(r'(男性?|女性?)', scenario_text)
+        elif endpoint == "recommend_item":
+            # 构建abstract_history - 主要使用现病史
+            abstract_history = (clinical_context.get("present_illness") or
+                                clinical_context.get("medical_history") or "")
 
-            age = age_match.group(1) if age_match else "35"
-            gender = "男" if gender_match and "男" in gender_match.group(1) else "女"
-
-            # 提取除了年龄和性别之外的其他文本内容作为clinic_info
-            clinic_info = scenario_text
-            if scenario_text:
-                # 尝试去除年龄和性别信息，保留其他症状描述
-                temp_text = scenario_text
-                # 去除年龄信息，如"45岁"、"35岁男性"等
-                temp_text = re.sub(r'\d+岁', '', temp_text)
-                # 去除性别信息
-                temp_text = re.sub(r'(男性?|女性?)', '', temp_text)
-                # 去除多余的标点符号和空格
-                temp_text = re.sub(r'^[，。、\s]+', '', temp_text)
-                temp_text = re.sub(r'[，。、\s]+$', '', temp_text)
-                temp_text = temp_text.strip()
-
-                # 如果提取出的文本太短（少于5个字符），说明提取不完整，使用原始文本
-                if len(temp_text) >= 5:
-                    clinic_info = temp_text
-                else:
-                    clinic_info = scenario_text
-
-            # 从clinical_context中提取department和diagnosis
-            department = "神经科"  # 默认值
-            diagnosis = "无"  # 默认值
-            history = "无"  # 默认值
-
-            if clinical_context:
-                try:
-                    clinical_dict = json.loads(clinical_context)
-                    department = clinical_dict.get("department", "神经科")
-                    diagnosis = clinical_dict.get("diagnosis", "无")
-                    medical_history = clinical_dict.get("medical_history", "")
-                    present_illness = clinical_dict.get("present_illness", "")
-                    history = f"{medical_history} {present_illness}".strip() if medical_history or present_illness else "无"
-                except:
-                    pass
-
-            import random
             return {
-                "session_id": str(random.randint(100000, 999999)),
-                "patient_id": str(random.randint(100000, 999999)),
-                "doctor_id": str(random.randint(100000, 999999)),
-                "department": department,
-                "source": "127.0.0.1",
-                "patient_sex": gender,
-                "patient_age": f"{age}岁",
-                "clinic_info": clinic_info,
-                "diagnose_name": diagnosis,
-                "abstract_history": history,
-                "recommend_count": retrieval.top_recommendations_per_scenario,
+                "session_id": f"{random.randint(1, 888)}",
+                "patient_id": f"{random.randint(1, 888)}",
+                "doctor_id": f"{random.randint(1, 888)}",
+                "department": clinical_context.get("department", "内科"),
+                "source": "test",
+                "patient_sex": patient_info.get("gender") if patient_info.get("gender") else "",
+                "patient_age": str(patient_info.get("age")) if patient_info.get("age") else "未知",
+                "clinic_info": clinical_context.get("chief_complaint") if clinical_context.get(
+                    "chief_complaint") else "",
+                "diagnose_name": str(clinical_context.get("diagnosis")) if clinical_context.get("diagnosis") else "",
+                "abstract_history": abstract_history,
+                "recommend_count": 3
             }
 
         return {}
 
-    def \
-            _rows_from_excel(self, file_bytes: bytes) -> List[Dict[str, str]]:
-        """从 Excel 中提取评测样本：临床场景文本与标准答案。"""
-        df = pd.read_excel(io.BytesIO(file_bytes), engine="openpyxl")
-        cols = {str(c).strip(): c for c in df.columns}
-        scenario_col = None
-        answer_col = None
-        for k in cols.keys():
-            if "临床场景" in k:
-                scenario_col = cols[k]
-            if "首选检查项目" in k and "标准化" in k:
-                answer_col = cols[k]
-        if scenario_col is None or answer_col is None:
-            return []
-        samples: List[Dict[str, str]] = []
-        for _, row in df.iterrows():
-            scenario_text = normalize_text(row.get(scenario_col))
-            gold_answer = normalize_text(row.get(answer_col))
-            if scenario_text:
-                samples.append({"scenario": scenario_text, "gold": gold_answer})
-        return samples
+    async def post_recommendation_request(self, server_url: str, endpoint: str,
+                                          payload: Dict[str, Any]) -> Dict[str, Any]:
+        """发送推荐请求"""
+        url = f"{server_url}/{endpoint}"
+        try:
+            timeout = aiohttp.ClientTimeout(total=600)  # 5分钟超时
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(url, json=payload) as response:
+                    if response.status == 200:
+                        return await response.json()
+                    else:
+                        error_text = await response.text()
+                        return {"error": f"HTTP {response.status}: {error_text}"}
+        except Exception as e:
+            return {"error": str(e)}
 
-    async def evaluate_excel(
-        self,
-        server_url: str,
-        endpoint: str,
-        file_bytes: bytes,
-        strategy_variants: Optional[List[Tuple[int,int]]] = None,
-        enable_reranking: bool = True,
-        need_llm_recommendations: bool = True,
-        apply_rule_filter: bool = True,
-        similarity_threshold: float = 0.6,
-        min_appropriateness_rating: int = 5,
-        include_raw_data: bool = False,
-        debug_mode: bool = False,
-        show_reasoning: bool = False,
-        compute_ragas: bool = False,
-        ground_truth: str = "",
+    async def _process_single_row(self,
+                                  server_url: str,
+                                  endpoint: str,
+                                  endpoint_name: str,
+                                  row: Dict[str, Any],
+                                  s_num: int,
+                                  r_num: int,
+                                  enable_reranking: bool,
+                                  need_llm_recommendations: bool,
+                                  apply_rule_filter: bool,
+                                  similarity_threshold: float,
+                                  min_appropriateness_rating: int,
+                                  show_reasoning: bool,
+                                  include_raw_data: bool,
+                                  debug_mode: bool,
+                                  compute_ragas: bool,
+                                  ground_truth: str,
+                                  idx: int) -> Dict[str, Any]:
+        """处理单行数据的异步函数"""
+        text = row["scenario"]
+        gold = row["gold"]
+        patient_info = row["patient_info"]
+        clinical_context = row["clinical_context"]
+
+        # 处理gold字段：去除*号并包装为列表
+        gold_processed = self._process_gold_field(gold)
+
+        # 创建RetrievalRequest
+        retr_dict = {
+            "enable_reranking": enable_reranking,
+            "need_llm_recommendations": need_llm_recommendations,
+            "apply_rule_filter": apply_rule_filter,
+            "top_scenarios": s_num,
+            "top_recommendations_per_scenario": r_num,
+            "similarity_threshold": similarity_threshold,
+            "min_appropriateness_rating": min_appropriateness_rating,
+            "show_reasoning": show_reasoning,
+            "include_raw_data": include_raw_data,
+            "debug_mode": debug_mode,
+            "compute_ragas": compute_ragas,
+            "ground_truth": ground_truth,
+        }
+        retr = EvalParams(**retr_dict)
+
+        # 构建请求payload
+        payload = self.build_request_payload(
+            endpoint_name, text, retr, patient_info, clinical_context, text
+        )
+
+        # 发送请求
+        start_time = time.time()
+        data = await self.post_recommendation_request(server_url, endpoint, payload)
+        end_time = time.time()
+        processing_time_ms = int((end_time - start_time) * 1000)
+
+        # 提取推荐结果
+        fc_groups = extract_recommendations_by_endpoint(endpoint_name, data)
+
+        # 获取预测项目列表
+        pred_items = []
+        if fc_groups and len(fc_groups) > 0:
+            first_group = fc_groups[0]
+            if isinstance(first_group, dict) and "final_choices" in first_group:
+                pred_items = first_group.get("final_choices", [])
+                if isinstance(pred_items, str):
+                    pred_items = [pred_items.strip()] if pred_items.strip() else []
+            else:
+                # 处理其他格式
+                pred_items = [str(item) for item in first_group] if isinstance(first_group, list) else []
+
+        # 检查 pred_items 是否为空，判断是否为有效样本
+        is_valid_sample = bool(pred_items and len(pred_items) > 0 and pred_items[0] != "")
+
+        # 调用judge_service进行评判
+        judge_result = None
+        top1_hit_value = 0
+        top3_hit_value = 0
+        hit_count_value = 0
+        hit_items_list = []
+        reason = ""
+
+        # 如果 pred_items 为空，跳过模型判定过程，直接标记为无效样本
+        if not is_valid_sample:
+            reason = "pred_items为空，跳过模型判定"
+        else:
+            try:
+                # 拼装judge_service的请求参数
+                judge_request = JudgeRequest(
+                    pred_items=pred_items,
+                    gold_items=gold_processed,
+                    online_model=True,
+                    model_judge=True
+                )
+
+                # 调用judge_service - 返回的是字典
+                response_dict = await self.judge_service.judge_recommendations(
+                    judge_request=judge_request
+                )
+
+                # 处理评判结果 - 直接使用字典
+                judge_result = response_dict.get("judge_result", {})
+
+                # 处理单个JudgeResult或多个JudgeResult的情况
+                if isinstance(judge_result, list) and len(judge_result) > 0:
+                    judge_result = judge_result[0]  # 取第一个结果
+
+                # 获取命中信息 - 直接从字典中获取
+                if judge_result:
+                    # 从字典中获取值，注意字段名和类型
+                    top1_hit_str = judge_result.get("top1_hit", "0")
+                    top3_hit_str = judge_result.get("top3_hit", "0")
+                    hit_count_str = judge_result.get("hit_count", "0")
+
+                    # 转换类型
+                    top1_hit_value = int(top1_hit_str) if top1_hit_str in ['0', '1'] else 0
+                    top3_hit_value = int(top3_hit_str) if top3_hit_str in ['0', '1'] else 0
+                    hit_count_value = int(hit_count_str) if hit_count_str and hit_count_str.isdigit() else 0
+
+                    # 获取命中项列表
+                    hit_items_list = judge_result.get("hit_items", [])
+                    if isinstance(hit_items_list, str):
+                        # 如果hit_items是字符串，尝试解析
+                        try:
+                            hit_items_list = json.loads(hit_items_list)
+                        except:
+                            hit_items_list = [hit_items_list]
+
+                    # 获取原因
+                    reason = judge_result.get("reason", "")
+
+            except Exception as e:
+                print(f"调用judge_service失败: {e}")
+                # 如果judge_service调用失败，使用简单的命中逻辑
+                if pred_items and gold_processed:
+                    # 简单的Top1命中判断
+                    if pred_items and pred_items[0] in gold_processed:
+                        top1_hit_value = 1
+
+                    # 简单的Top3命中判断
+                    top3_items = pred_items[:3] if len(pred_items) > 3 else pred_items
+                    if any(item in gold_processed for item in top3_items):
+                        top3_hit_value = 1
+
+                    # 计算命中数量
+                    hit_items_list = [item for item in pred_items if item in gold_processed]
+                    hit_count_value = len(hit_items_list)
+                    reason = f"简单匹配: Top1命中={top1_hit_value}, Top3命中={top3_hit_value}, 命中{hit_count_value}项"
+
+        # 计算得分
+        top1_score = top1_hit_value * 1.0  # top1命中得1分
+        top3_score = top3_hit_value * 1.0  # top3命中得1分
+
+        # 综合得分计算：加权平均，可以根据需求调整权重
+        # 这里使用70% top1 + 30% top3的权重
+        combined_score = 0.7 * top1_score + 0.3 * top3_score
+
+        # 返回该行的结果
+        return {
+            'row_index': idx + 1,
+            'scenario': text,
+            'patient_info': json.dumps(patient_info, ensure_ascii=False) if patient_info else "",
+            'clinical_context': json.dumps(clinical_context, ensure_ascii=False) if clinical_context else "",
+            'gold_original': gold,
+            'gold_processed': json.dumps(gold_processed, ensure_ascii=False),
+            'pred_items': json.dumps(pred_items, ensure_ascii=False),
+            'processing_time_ms': processing_time_ms,
+            'is_valid_sample': is_valid_sample,
+            'top1_hit': top1_hit_value,
+            'top3_hit': top3_hit_value,
+            'hit_count': hit_count_value,
+            'hit_items': json.dumps(hit_items_list, ensure_ascii=False),
+            'top1_score': round(top1_score, 2),
+            'top3_score': round(top3_score, 2),
+            'combined_score': round(combined_score, 2),
+            'judge_reason': reason
+        }
+
+    async def evaluate_excel_concurrent(
+            self,
+            server_url: str,
+            endpoint: str,
+            endpoint_name: str,
+            file_bytes: bytes,
+            limit: Optional[int] = None,
+            strategy_variants: Optional[List[Tuple[int, int]]] = None,
+            enable_reranking: bool = True,
+            need_llm_recommendations: bool = True,
+            apply_rule_filter: bool = True,
+            similarity_threshold: float = 0.4,
+            min_appropriateness_rating: int = 4,
+            include_raw_data: bool = False,
+            debug_mode: bool = False,
+            show_reasoning: bool = False,
+            compute_ragas: bool = False,
+            ground_truth: str = "",
     ) -> Dict[str, Any]:
-        """基于 Excel 的批量评测：对多组合(top@k)进行横向统计并输出 A/B 与 variants。"""
+        """基于Excel的批量评测（并发处理每一行）"""
+        # 读取原始Excel文件
+        try:
+            original_df = pd.read_excel(io.BytesIO(file_bytes))
+        except Exception as e:
+            print(f"读取原始Excel失败: {e}")
+            return {
+                "overall_accuracy": 0.0,
+                "overall_top1_accuracy": 0.0,
+                "overall_top3_accuracy": 0.0,
+                "overall_combined_accuracy": 0.0,
+                "average_processing_time_ms": 0,
+                "total_samples": 0,
+                "variants": [],
+                "combination_a": {
+                    "accuracy": 0.0,
+                    "top1_accuracy": 0.0,
+                    "top3_accuracy": 0.0,
+                    "combined_accuracy": 0.0,
+                    "total_samples": 0,
+                    "hit_samples": 0,
+                    "details": []
+                },
+                "combination_b": {
+                    "accuracy": 0.0,
+                    "top1_accuracy": 0.0,
+                    "top3_accuracy": 0.0,
+                    "combined_accuracy": 0.0,
+                    "total_samples": 0,
+                    "hit_samples": 0,
+                    "details": []
+                },
+                "result_excel": b"",
+                "result_dataframe": []
+            }
+
         rows = self._rows_from_excel(file_bytes)
+        if not rows:
+            return {
+                "overall_accuracy": 0.0,
+                "overall_top1_accuracy": 0.0,
+                "overall_top3_accuracy": 0.0,
+                "overall_combined_accuracy": 0.0,
+                "average_processing_time_ms": 0,
+                "total_samples": 0,
+                "variants": [],
+                "combination_a": {
+                    "accuracy": 0.0,
+                    "top1_accuracy": 0.0,
+                    "top3_accuracy": 0.0,
+                    "combined_accuracy": 0.0,
+                    "total_samples": 0,
+                    "hit_samples": 0,
+                    "details": []
+                },
+                "combination_b": {
+                    "accuracy": 0.0,
+                    "top1_accuracy": 0.0,
+                    "top3_accuracy": 0.0,
+                    "combined_accuracy": 0.0,
+                    "total_samples": 0,
+                    "hit_samples": 0,
+                    "details": []
+                },
+                "result_excel": b"",
+                "result_dataframe": []
+            }
+
         if strategy_variants is None:
-            strategy_variants = [(1,1),(1,3),(3,1),(3,3)]
-        if endpoint == "recommend-simple":
-            strategy_variants = [(s,r) for (s,r) in strategy_variants if s < 5]
+            strategy_variants = [ (3, 3)]
+
+        # 对于不同接口，调整strategy_variants
+        if endpoint == "recommend_simple_final_choices":
+            strategy_variants = [(s, r) for (s, r) in strategy_variants if s < 5]
 
         variants_results = []
-        details_map: Dict[str, List[Dict[str, Any]]] = {}
-        acc_map: Dict[str, float] = {}
-        ms_all: List[int] = []
+        all_processing_times = []
+        result_data = []
 
         for (s_num, r_num) in strategy_variants:
             key = f"top_s{s_num}_top_r{r_num}"
-            details: List[Dict[str, Any]] = []
-            for r in rows:
-                text = r["scenario"]
-                gold = r["gold"]
 
-                # 创建RetrievalRequest，添加intelligent-recommendation需要的字段
-                retr_dict = {
-                    "enable_reranking": enable_reranking,
-                    "need_llm_recommendations": need_llm_recommendations,
-                    "apply_rule_filter": apply_rule_filter,
-                    "top_scenarios": s_num,
-                    "top_recommendations_per_scenario": r_num,
-                    "similarity_threshold": similarity_threshold,
-                    "min_appropriateness_rating": min_appropriateness_rating,
-                }
-                retr = RetrievalRequest(**retr_dict)
-
-                # 动态添加额外字段
-                retr.show_reasoning = show_reasoning
-                retr.include_raw_data = include_raw_data
-                retr.debug_mode = debug_mode
-                retr.compute_ragas = compute_ragas
-                retr.ground_truth = ground_truth
-
-                payload = self.build_request_payload(endpoint, text, retr, standard_query=text)
-                data = await self.post_recommendation_request(server_url, endpoint, payload)
-
-                # 根据不同接口提取推荐结果
-                fc_groups = extract_recommendations_by_endpoint(endpoint, data)
-
-                # 获取处理时间
-                ms = 0
-                if endpoint in ["recommend", "recommend-simple"]:
-                    ms = data.get("processing_time_ms", 0)
-                elif endpoint == "intelligent-recommendation":
-                    ms = data.get("processing_time_ms", 0)
-
-                per_hits = [ _hit(group, gold) for group in fc_groups[:s_num] ]
-                if s_num == 1 and r_num == 1:
-                    final = fc_groups[0] if fc_groups else []
-                    hit = 1 if final and normalize_text(gold) == normalize_text(final[0]) else 0
-                    details.append({
-                        "clinical_scenario": text,
-                        "standard_answer": gold,
-                        "recommendations": final,
-                        "per_scenario_hits": per_hits,
-                        "hit": bool(hit),
-                        "processing_time_ms": ms,
-                    })
-                else:
-                    hit = 1 if any(per_hits) else 0
-                    details.append({
-                        "clinical_scenario": text,
-                        "standard_answer": gold,
-                        "recommendations": fc_groups,
-                        "per_scenario_hits": per_hits,
-                        "hit": bool(hit),
-                        "processing_time_ms": ms,
-                    })
-            total = len(details)
-            hit_cnt = sum(1 for d in details if d.get("hit"))
-            acc = (hit_cnt / total) if total else 0.0
-            details_map[key] = details
-            acc_map[key] = acc
-            ms_all.extend([d.get("processing_time_ms",0) for d in details])
-            variants_results.append({
-                "label": key,
-                "accuracy": acc,
-                "total_samples": total,
-                "hit_samples": hit_cnt,
-                "details": details,
-            })
-
-        avg_ms = int(sum(ms_all)/len(ms_all)) if ms_all else 0
-        acc_a = acc_map.get("top_s1_top_r1", 0.0)
-        acc_b = acc_map.get("top_s3_top_r3", 0.0)
-        details_a = details_map.get("top_s1_top_r1", [])
-        details_b = details_map.get("top_s3_top_r3", [])
-
-        return {
-            "overall_accuracy": acc_b if acc_b else max(acc_map.values() or [0.0]),
-            "combination_a": {
-                "accuracy": acc_a,
-                "total_samples": len(details_a),
-                "hit_samples": sum(1 for d in details_a if d.get("hit")),
-                "details": details_a,
-            },
-            "combination_b": {
-                "accuracy": acc_b,
-                "total_samples": len(details_b),
-                "hit_samples": sum(1 for d in details_b if d.get("hit")),
-                "details": details_b,
-            },
-            "variants": variants_results,
-            "average_processing_time_ms": avg_ms,
-            "total_samples": sum(v["total_samples"] for v in variants_results) // (len(variants_results) or 1),
-        }
-
-    async def evaluate_params(
-        self,
-        server_url: str,
-        endpoint: str,
-        standard_query: Optional[str],
-        patient_info: Optional[str],
-        clinical_context: Optional[str],
-        gold_answer: Optional[str],
-        enable_reranking: bool,
-        need_llm_recommendations: bool,
-        apply_rule_filter: bool,
-        top_scenarios: int,
-        top_recommendations_per_scenario: int,
-        show_reasoning: Optional[bool],
-        include_raw_data: Optional[bool],
-        similarity_threshold: float,
-        min_appropriateness_rating: int,
-    ) -> Dict[str, Any]:
-        """非文件模式评测：按传入策略进行一次评测，并与 A/B 组合映射对齐。"""
-        if standard_query and (patient_info or clinical_context):
-            raise ValueError("standard_query conflicts with patient/clinical")
-        if standard_query:
-            text = standard_query
-        else:
-            if not clinical_context:
-                raise ValueError("clinical_context required")
-            cc = json.loads(clinical_context)
-            text = str(cc.get("chief_complaint") or "")
-
-        retr = RetrievalRequest(
-            enable_reranking=enable_reranking,
-            need_llm_recommendations=need_llm_recommendations,
-            apply_rule_filter=apply_rule_filter,
-            top_scenarios=top_scenarios,
-            top_recommendations_per_scenario=top_recommendations_per_scenario,
-            similarity_threshold=similarity_threshold,
-            min_appropriateness_rating=min_appropriateness_rating,
-        )
-
-        # 动态添加额外字段
-        retr.show_reasoning = bool(show_reasoning) if show_reasoning is not None else False
-        retr.include_raw_data = bool(include_raw_data) if include_raw_data is not None else False
-
-        payload = self.build_request_payload(
-            endpoint, text, retr,
-            standard_query=standard_query if standard_query else None,
-            patient_info=patient_info,
-            clinical_context=clinical_context
-        )
-        data = await self.post_recommendation_request(server_url, endpoint, payload)
-
-        # 根据不同接口提取推荐结果
-        groups = extract_recommendations_by_endpoint(endpoint, data)
-
-        # 获取处理时间
-        ms = 0
-        if endpoint in ["recommend", "recommend-simple"]:
-            ms = data.get("processing_time_ms", 0)
-        elif endpoint == "intelligent-recommendation":
-            ms = data.get("processing_time_ms", 0)
-
-        gold = normalize_text(gold_answer) if gold_answer else ""
-        per_hits = [ is_gold_hit_in_choices(group, gold) for group in groups[:top_scenarios] ] if gold else [1 if groups else 0]
-        overall_hit = 1 if any(per_hits) else 0
-        details = [{
-            "clinical_scenario": text,
-            "standard_answer": gold,
-            "recommendations": groups if top_scenarios > 1 else (groups[0] if groups else []),
-            "per_scenario_hits": per_hits,
-            "hit": bool(overall_hit),
-            "processing_time_ms": ms,
-        }]
-        acc = float(overall_hit)
-        return {
-            "overall_accuracy": acc,
-            "combination_a": {
-                "accuracy": acc if top_scenarios == 1 and top_recommendations_per_scenario == 1 else 0.0,
-                "total_samples": 1,
-                "hit_samples": 1 if acc else 0,
-                "details": details,
-            },
-            "combination_b": {
-                "accuracy": acc if top_scenarios == 3 and top_recommendations_per_scenario == 3 else 0.0,
-                "total_samples": 1,
-                "hit_samples": 1 if acc else 0,
-                "details": details,
-            },
-            "variants": [
-                {
-                    "label": f"top_s{top_scenarios}_top_r{top_recommendations_per_scenario}",
-                    "accuracy": acc,
-                    "total_samples": 1,
-                    "hit_samples": 1 if acc else 0,
-                    "details": details,
-                }
-            ],
-            "average_processing_time_ms": ms,
-            "total_samples": 1,
-        }
-
-    async def evaluate_all_endpoints(
-        self,
-        file_bytes: bytes,
-        top_scenarios: int = 3,
-        top_recommendations_per_scenario: int = 3,
-        similarity_threshold: float = 0.7,
-        min_appropriateness_rating: int = 5,
-    ) -> Dict[str, Any]:
-        """并发评估所有4个接口并返回汇总结果，使用线程池模拟真实用户场景"""
-
-        # 定义4个接口配置
-        endpoints_config = [
-            {
-                "name": "recommend",
-                "server_url": "http://203.83.233.236:5188",
-                "endpoint": "recommend",
-            },
-            {
-                "name": "recommend-simple",
-                "server_url": "http://203.83.233.236:5188",
-                "endpoint": "recommend-simple",
-            },
-            {
-                "name": "intelligent-recommendation",
-                "server_url": "http://203.83.233.236:5189",
-                "endpoint": "intelligent-recommendation",
-            },
-            {
-                "name": "recommend_item_with_reason",
-                "server_url": "http://203.83.233.236:5187",
-                "endpoint": "recommend_item_with_reason",
-            },
-        ]
-
-        # 使用线程池并发调用所有接口，模拟真实用户场景
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            loop = asyncio.get_event_loop()
+            # 并发处理每一行数据
+            rows_to_process = rows[:limit] if limit else rows
             tasks = []
-            for config in endpoints_config:
-                # 将每个评估任务提交到线程池
-                task = loop.run_in_executor(
-                    executor,
-                    self._evaluate_single_sync,
-                    config["server_url"],
-                    config["endpoint"],
-                    file_bytes,
-                    top_scenarios,
-                    top_recommendations_per_scenario,
-                    similarity_threshold,
-                    min_appropriateness_rating,
-                )
-                tasks.append((config["name"], task))
-
-            # 等待所有任务完成
-            results_list = await asyncio.gather(*[task for _, task in tasks], return_exceptions=True)
-
-        # 整理结果
-        all_results = {}
-        for i, (endpoint_name, _) in enumerate(tasks):
-            if isinstance(results_list[i], Exception):
-                all_results[endpoint_name] = {
-                    "error": str(results_list[i]),
-                    "status": "failed"
-                }
-            else:
-                all_results[endpoint_name] = {
-                    "status": "success",
-                    "result": results_list[i]
-                }
-
-        # 计算总体统计
-        successful_results = [r for r in results_list if not isinstance(r, Exception)]
-        if successful_results:
-            total_samples = len(self._rows_from_excel(file_bytes))
-            avg_overall_accuracy = sum(r["overall_accuracy"] for r in successful_results) / len(successful_results)
-            avg_processing_time = sum(r["average_processing_time_ms"] for r in successful_results) / len(successful_results)
-        else:
-            total_samples = 0
-            avg_overall_accuracy = 0.0
-            avg_processing_time = 0
-
-        summary = {
-            "total_endpoints_tested": len(endpoints_config),
-            "successful_endpoints": len(successful_results),
-            "failed_endpoints": len(endpoints_config) - len(successful_results),
-            "average_overall_accuracy": avg_overall_accuracy,
-            "average_processing_time_ms": int(avg_processing_time),
-            "total_samples": total_samples,
-        }
-
-        # 保存评测结果到CSV文件
-        csv_file_path = self._save_evaluation_to_csv(all_results, summary, file_bytes)
-
-        return {
-            "summary": summary,
-            "endpoint_results": all_results,
-            "csv_file_path": csv_file_path,
-        }
-
-    def _evaluate_single_sync(
-        self,
-        server_url: str,
-        endpoint: str,
-        file_bytes: bytes,
-        top_scenarios: int,
-        top_recommendations_per_scenario: int,
-        similarity_threshold: float,
-        min_appropriateness_rating: int,
-    ) -> Dict[str, Any]:
-        """同步方式执行单个接口评估，用于线程池"""
-        # 创建新的事件循环
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            result = loop.run_until_complete(
-                self.evaluate_excel(
+            for idx, row in enumerate(rows_to_process):
+                task = self._process_single_row(
                     server_url=server_url,
                     endpoint=endpoint,
+                    endpoint_name=endpoint_name,
+                    row=row,
+                    s_num=s_num,
+                    r_num=r_num,
+                    enable_reranking=enable_reranking,
+                    need_llm_recommendations=need_llm_recommendations,
+                    apply_rule_filter=apply_rule_filter,
+                    similarity_threshold=similarity_threshold,
+                    min_appropriateness_rating=min_appropriateness_rating,
+                    show_reasoning=show_reasoning,
+                    include_raw_data=include_raw_data,
+                    debug_mode=debug_mode,
+                    compute_ragas=compute_ragas,
+                    ground_truth=ground_truth,
+                    idx=idx
+                )
+                tasks.append(task)
+
+            # 使用信号量控制并发数
+            semaphore = asyncio.Semaphore(self.max_concurrent_per_endpoint)
+
+            async def bounded_task(task):
+                async with semaphore:
+                    return await task
+
+            bounded_tasks = [bounded_task(task) for task in tasks]
+
+            # 并发执行所有任务
+            variant_results = await asyncio.gather(*bounded_tasks, return_exceptions=True)
+
+            # 处理结果
+            variant_details = []
+            variant_processing_times = []
+
+            top1_hits = 0
+            top3_hits = 0
+            total_hit_count = 0
+            total_samples = 0  # 只计算有效样本（final_choices 不为空）
+            total_rows = len(rows_to_process)  # 总行数
+
+            for idx, result in enumerate(variant_results):
+                if isinstance(result, Exception):
+                    print(f"处理第{idx + 1}行数据时发生错误: {result}")
+                    # 添加错误记录
+                    detail = {
+                        'row_index': idx + 1,
+                        'scenario': rows[idx]["scenario"],
+                        'error': str(result),
+                        'top1_hit': 0,
+                        'top3_hit': 0,
+                        'hit_count': 0,
+                        'processing_time_ms': 0,
+                        'variant': key,
+                        'is_valid_sample': False  # 标记为无效样本
+                    }
+                    variant_details.append(detail)
+                    result_data.append(detail)
+                    continue
+
+                detail = {**result, 'variant': key}
+
+                # 检查 pred_items 是否为空
+                pred_items_str = detail.get('pred_items', '[]')
+                try:
+                    pred_items = json.loads(pred_items_str) if isinstance(pred_items_str, str) else pred_items_str
+                    is_valid = bool(pred_items and len(pred_items) > 0 and pred_items[0] != "")
+                except:
+                    is_valid = False
+
+                detail['is_valid_sample'] = is_valid
+                variant_details.append(detail)
+                result_data.append(detail)
+
+                # 只有有效样本才计入统计
+                if is_valid:
+                    total_samples += 1
+                    top1_hits += detail['top1_hit']
+                    top3_hits += detail['top3_hit']
+                    total_hit_count += detail['hit_count']
+                    variant_processing_times.append(detail['processing_time_ms'])
+                    all_processing_times.append(detail['processing_time_ms'])
+
+            # 计算该variant的准确率（基于有效样本数）
+            top1_accuracy = top1_hits / total_samples if total_samples > 0 else 0
+            top3_accuracy = top3_hits / total_samples if total_samples > 0 else 0
+            avg_hit_count = total_hit_count / total_samples if total_samples > 0 else 0
+            avg_processing_time = np.mean(variant_processing_times) if variant_processing_times else 0
+
+            # 计算综合准确率
+            combined_accuracy = 0.7 * top1_accuracy + 0.3 * top3_accuracy
+
+            variant_result = {
+                'variant_name': key,
+                'top1_accuracy': round(top1_accuracy, 4),
+                'top3_accuracy': round(top3_accuracy, 4),
+                'combined_accuracy': round(combined_accuracy, 4),
+                'average_hit_count': round(avg_hit_count, 2),
+                'average_processing_time_ms': round(avg_processing_time, 2),
+                'total_samples': total_samples,  # 有效样本数
+                'total_rows': total_rows,  # 总行数
+                'invalid_samples': total_rows - total_samples,  # 无效样本数
+                'top1_hits': top1_hits,
+                'top3_hits': top3_hits,
+                'total_hit_count': total_hit_count,
+                'details': variant_details
+            }
+
+            variants_results.append(variant_result)
+
+        # 计算整体统计信息
+        if all_processing_times:
+            avg_processing_time_overall = np.mean(all_processing_times)
+        else:
+            avg_processing_time_overall = 0
+
+        # 计算总体准确率（取所有variant的平均值）
+        if variants_results:
+            overall_top1_accuracy = np.mean([v['top1_accuracy'] for v in variants_results])
+            overall_top3_accuracy = np.mean([v['top3_accuracy'] for v in variants_results])
+            overall_combined_accuracy = np.mean([v['combined_accuracy'] for v in variants_results])
+            overall_accuracy = overall_top1_accuracy  # 保持向后兼容
+        else:
+            overall_top1_accuracy = 0
+            overall_top3_accuracy = 0
+            overall_combined_accuracy = 0
+            overall_accuracy = 0
+
+        # 设置combination_a和combination_b（取前两个variant）
+        combination_a = {}
+        combination_b = {}
+
+        if len(variants_results) >= 1:
+            v = variants_results[0]
+            combination_a = {
+                "accuracy": v['top1_accuracy'],
+                "top1_accuracy": v['top1_accuracy'],
+                "top3_accuracy": v['top3_accuracy'],
+                "combined_accuracy": v['combined_accuracy'],
+                "total_samples": v['total_samples'],
+                "hit_samples": v['top1_hits'],
+                "top3_hit_samples": v['top3_hits'],
+                "average_processing_time_ms": v['average_processing_time_ms'],
+                "details": v['details'][:10]  # 只取前10个详细结果
+            }
+
+        if len(variants_results) >= 2:
+            v = variants_results[1]
+            combination_b = {
+                "accuracy": v['top1_accuracy'],
+                "top1_accuracy": v['top1_accuracy'],
+                "top3_accuracy": v['top3_accuracy'],
+                "combined_accuracy": v['combined_accuracy'],
+                "total_samples": v['total_samples'],
+                "hit_samples": v['top1_hits'],
+                "top3_hit_samples": v['top3_hits'],
+                "average_processing_time_ms": v['average_processing_time_ms'],
+                "details": v['details'][:10]  # 只取前10个详细结果
+            }
+
+        # 创建结果DataFrame
+        result_df = pd.DataFrame(result_data)
+
+        # 保存结果到Excel（包含原始内容）
+        output_excel_bytes = self._create_result_excel(
+            original_df=original_df,
+            result_df=result_df,
+            rows=rows,
+            variants_results=variants_results,
+            overall_top1_accuracy=overall_top1_accuracy,
+            overall_top3_accuracy=overall_top3_accuracy,
+            overall_combined_accuracy=overall_combined_accuracy,
+            avg_processing_time_overall=avg_processing_time_overall
+        )
+
+        return {
+            "overall_accuracy": overall_accuracy,
+            "overall_top1_accuracy": overall_top1_accuracy,
+            "overall_top3_accuracy": overall_top3_accuracy,
+            "overall_combined_accuracy": overall_combined_accuracy,
+            "average_processing_time_ms": avg_processing_time_overall,
+            "total_samples": len(rows),
+            "variants": variants_results,
+            "combination_a": combination_a,
+            "combination_b": combination_b,
+            "result_excel": output_excel_bytes,
+            "result_dataframe": result_df.to_dict('records')
+        }
+
+    async def evaluate_all_endpoints_concurrent(
+            self,
+            file_bytes: bytes,
+            limit: Optional[int] = None,
+            top_scenarios: int = 3,
+            top_recommendations_per_scenario: int = 3,
+            similarity_threshold: float = 0.4,
+            min_appropriateness_rating: int = 4,
+            progress_callback: Optional[callable] = None,
+    ) -> Dict[str, Any]:
+        """并发评估所有4个接口并返回汇总结果（纯异步架构，单event loop）"""
+
+        # 报告初始进度
+        if progress_callback:
+            progress_callback(0, len(self.eval_config), "开始评测...")
+
+        # 创建所有评测任务（纯异步，无需线程池）
+        async def evaluate_single_with_progress(config: Dict[str, Any], index: int) -> tuple:
+            """评测单个接口并报告进度"""
+            endpoint_name = config["name"]
+            try:
+                result = await self.evaluate_excel_concurrent(
+                    server_url=config["server_url"],
+                    endpoint=config["endpoint"],
+                    endpoint_name=endpoint_name,
                     file_bytes=file_bytes,
+                    limit=limit,
                     strategy_variants=[(top_scenarios, top_recommendations_per_scenario)],
-                    enable_reranking=False,
-                    need_llm_recommendations=False,
-                    apply_rule_filter=False,
+                    enable_reranking=True,
+                    need_llm_recommendations=True,
+                    apply_rule_filter=True,
                     similarity_threshold=similarity_threshold,
                     min_appropriateness_rating=min_appropriateness_rating,
                     show_reasoning=False,
@@ -608,115 +753,411 @@ class EvaluationService:
                     compute_ragas=False,
                     ground_truth="",
                 )
-            )
-            return result
-        finally:
-            loop.close()
+                if progress_callback:
+                    progress_callback(index + 1, len(self.eval_config), f"已完成 {endpoint_name}")
+                return (endpoint_name, result, None)
+            except Exception as e:
+                if progress_callback:
+                    progress_callback(index + 1, len(self.eval_config), f"{endpoint_name} 失败: {str(e)}")
+                return (endpoint_name, None, e)
 
-    def _save_evaluation_to_csv(
-        self,
-        all_results: Dict[str, Any],
-        summary: Dict[str, Any],
-        file_bytes: bytes,
-    ) -> str:
-        """将评测结果保存到CSV文件"""
-        # 创建结果目录
-        results_dir = "evaluation_results"
-        if not os.path.exists(results_dir):
-            os.makedirs(results_dir)
+        # 使用 asyncio.gather 并发执行所有接口评测（第一层并发）
+        # 每个接口内部使用 Semaphore 控制单行并发（第二层并发）
+        tasks = [
+            evaluate_single_with_progress(config, idx)
+            for idx, config in enumerate(self.eval_config)
+        ]
 
-        # 生成文件名（带时间戳）
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        csv_filename = f"evaluation_all_{timestamp}.csv"
-        csv_filepath = os.path.join(results_dir, csv_filename)
+        results_list = await asyncio.gather(*tasks, return_exceptions=False)
 
-        # 提取原始测试样本
-        rows = self._rows_from_excel(file_bytes)
+        # 整理结果
+        all_results = {}
+        successful_results = []
 
-        # 准备CSV数据
-        csv_data = []
-
-        # 添加汇总信息行
-        csv_data.append({
-            "接口名称": "【汇总统计】",
-            "状态": f"成功: {summary['successful_endpoints']}/{summary['total_endpoints_tested']}",
-            "平均命中率": f"{summary['average_overall_accuracy']:.2%}",
-            "平均处理时间(ms)": summary['average_processing_time_ms'],
-            "样本数": summary['total_samples'],
-            "临床场景": "",
-            "标准答案": "",
-            "推荐结果": "",
-            "是否命中": "",
-        })
-        csv_data.append({})  # 空行
-
-        # 为每个接口添加详细结果
-        for endpoint_name, endpoint_result in all_results.items():
-            if endpoint_result["status"] == "success":
-                result = endpoint_result["result"]
-
-                # 添加接口统计行
-                csv_data.append({
-                    "接口名称": f"【{endpoint_name}】",
-                    "状态": "成功",
-                    "平均命中率": f"{result['overall_accuracy']:.2%}",
-                    "平均处理时间(ms)": result['average_processing_time_ms'],
-                    "样本数": result['total_samples'],
-                    "临床场景": "",
-                    "标准答案": "",
-                    "推荐结果": "",
-                    "是否命中": "",
-                })
-
-                # 获取组合B的详细结果（3场景3推荐）
-                combination_key = f"top_s{result.get('variants', [{}])[0].get('label', '').split('_')[1] if result.get('variants') else '3'}"
-                details = result.get('combination_b', {}).get('details', [])
-
-                # 添加每个样本的详细结果
-                for i, detail in enumerate(details):
-                    recommendations = detail.get('recommendations', [])
-                    # 格式化推荐结果
-                    if isinstance(recommendations, list):
-                        if recommendations and isinstance(recommendations[0], list):
-                            # 多场景情况
-                            rec_str = " | ".join([", ".join(group) for group in recommendations])
-                        else:
-                            # 单场景情况
-                            rec_str = ", ".join(recommendations)
-                    else:
-                        rec_str = str(recommendations)
-
-                    csv_data.append({
-                        "接口名称": endpoint_name,
-                        "状态": "",
-                        "平均命中率": "",
-                        "平均处理时间(ms)": detail.get('processing_time_ms', ''),
-                        "样本数": "",
-                        "临床场景": detail.get('clinical_scenario', ''),
-                        "标准答案": detail.get('standard_answer', ''),
-                        "推荐结果": rec_str,
-                        "是否命中": "✓" if detail.get('hit') else "✗",
-                    })
-
-                csv_data.append({})  # 接口之间添加空行
-
+        for endpoint_name, result, error in results_list:
+            if error:
+                all_results[endpoint_name] = {
+                    "error": str(error),
+                    "status": "failed"
+                }
+            elif result and "error" in result:
+                all_results[endpoint_name] = {
+                    "error": result["error"],
+                    "status": "failed"
+                }
             else:
-                # 失败的接口
-                csv_data.append({
-                    "接口名称": f"【{endpoint_name}】",
-                    "状态": f"失败: {endpoint_result.get('error', '未知错误')}",
-                    "平均命中率": "",
-                    "平均处理时间(ms)": "",
-                    "样本数": "",
-                    "临床场景": "",
-                    "标准答案": "",
-                    "推荐结果": "",
-                    "是否命中": "",
+                all_results[endpoint_name] = {
+                    "status": "success",
+                    "result": result
+                }
+                successful_results.append(result)
+
+        # 计算总体统计
+        if successful_results:
+            # 从第一个成功的结果中获取 total_samples，避免重复解析Excel
+            total_samples = successful_results[0].get('total_samples', 0)
+
+            # 计算平均准确率
+            avg_overall_accuracy = sum(r["overall_accuracy"] for r in successful_results) / len(successful_results)
+            avg_top1_accuracy = sum(r["overall_top1_accuracy"] for r in successful_results) / len(successful_results)
+            avg_top3_accuracy = sum(r["overall_top3_accuracy"] for r in successful_results) / len(successful_results)
+            avg_combined_accuracy = sum(r["overall_combined_accuracy"] for r in successful_results) / len(
+                successful_results)
+
+            # 计算平均处理时间
+            avg_processing_time = sum(r["average_processing_time_ms"] for r in successful_results) / len(
+                successful_results)
+        else:
+            total_samples = 0
+            avg_overall_accuracy = 0.0
+            avg_top1_accuracy = 0.0
+            avg_top3_accuracy = 0.0
+            avg_combined_accuracy = 0.0
+            avg_processing_time = 0
+
+        summary = {
+            "total_endpoints_tested": len(self.eval_config),
+            "successful_endpoints": len(successful_results),
+            "failed_endpoints": len(self.eval_config) - len(successful_results),
+            "average_overall_accuracy": avg_overall_accuracy,
+            "average_top1_accuracy": avg_top1_accuracy,
+            "average_top3_accuracy": avg_top3_accuracy,
+            "average_combined_accuracy": avg_combined_accuracy,
+            "average_processing_time_ms": int(avg_processing_time),
+            "total_samples": total_samples,
+            "concurrent_per_endpoint": self.max_concurrent_per_endpoint,
+        }
+
+        # 保存评测结果到Excel
+        final_result_excel = self._create_final_summary_excel(all_results, summary, file_bytes)
+
+        # 生成接口汇总数据（用于前端显示）- 使用公共方法去除冗余
+        endpoint_summary = []
+        for endpoint_name, result in all_results.items():
+            if result.get('status') == 'success':
+                endpoint_result = result.get('result', {})
+                result_df_data = endpoint_result.get('result_dataframe', [])
+                if result_df_data:
+                    stats = self._calculate_endpoint_statistics(result_df_data, endpoint_name)
+                    endpoint_summary.append(stats)
+
+        return {
+            "summary": summary,
+            "endpoint_summary": endpoint_summary,
+            "result_excel": final_result_excel,
+        }
+
+    def _create_result_excel(self, original_df: pd.DataFrame, result_df: pd.DataFrame,
+                             rows: List[Dict], variants_results: List[Dict],
+                             overall_top1_accuracy: float, overall_top3_accuracy: float,
+                             overall_combined_accuracy: float, avg_processing_time_overall: float) -> bytes:
+        """创建包含评测结果的Excel文件"""
+        output = io.BytesIO()
+
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            # 1. 原始数据Sheet
+            original_df.to_excel(writer, sheet_name='原始数据', index=False)
+
+            # 2. 详细结果Sheet
+            result_df.to_excel(writer, sheet_name='详细结果', index=False)
+
+            # 3. 汇总统计Sheet
+            summary_data = {
+                '指标': [
+                    '评测时间', '总样本数', '测试变体数',
+                    '总体Top1准确率', '总体Top3准确率', '总体综合准确率',
+                    '平均处理时间(毫秒)', '最大处理时间(毫秒)', '最小处理时间(毫秒)'
+                ],
+                '值': [
+                    datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    len(rows),
+                    len(variants_results),
+                    f"{overall_top1_accuracy:.2%}",
+                    f"{overall_top3_accuracy:.2%}",
+                    f"{overall_combined_accuracy:.2%}",
+                    f"{avg_processing_time_overall:.2f}",
+                    f"{max(result_df['processing_time_ms']) if 'processing_time_ms' in result_df.columns and len(result_df) > 0 else 0}",
+                    f"{min(result_df['processing_time_ms']) if 'processing_time_ms' in result_df.columns and len(result_df) > 0 else 0}"
+                ]
+            }
+            summary_df = pd.DataFrame(summary_data)
+            summary_df.to_excel(writer, sheet_name='汇总统计', index=False)
+
+            # 4. 变体对比Sheet
+            variant_data = []
+            for v in variants_results:
+                variant_data.append({
+                    '变体名称': v['variant_name'],
+                    'Top1准确率': f"{v['top1_accuracy']:.2%}",
+                    'Top3准确率': f"{v['top3_accuracy']:.2%}",
+                    '综合准确率': f"{v['combined_accuracy']:.2%}",
+                    '平均命中数': v['average_hit_count'],
+                    '平均处理时间(毫秒)': v['average_processing_time_ms'],
+                    '总样本数': v['total_samples'],
+                    'Top1命中数': v['top1_hits'],
+                    'Top3命中数': v['top3_hits']
                 })
-                csv_data.append({})
+            variant_df = pd.DataFrame(variant_data)
+            variant_df.to_excel(writer, sheet_name='变体对比', index=False)
 
-        # 将数据转换为DataFrame并保存
-        df = pd.DataFrame(csv_data)
-        df.to_csv(csv_filepath, index=False, encoding='utf-8-sig')
+            # 5. Top1命中分析Sheet
+            if 'top1_hit' in result_df.columns:
+                top1_stats = {
+                    '指标': ['Top1总命中数', 'Top1总未命中数', 'Top1命中率', 'Top1平均得分'],
+                    '值': [
+                        int(result_df['top1_hit'].sum()),
+                        int(len(result_df) - result_df['top1_hit'].sum()),
+                        f"{result_df['top1_hit'].mean():.2%}",
+                        f"{result_df['top1_score'].mean():.2f}" if 'top1_score' in result_df.columns else "N/A"
+                    ]
+                }
+                top1_df = pd.DataFrame(top1_stats)
+                top1_df.to_excel(writer, sheet_name='Top1分析', index=False)
 
-        return csv_filepath
+            # 6. Top3命中分析Sheet
+            if 'top3_hit' in result_df.columns:
+                top3_stats = {
+                    '指标': ['Top3总命中数', 'Top3总未命中数', 'Top3命中率', 'Top3平均得分'],
+                    '值': [
+                        int(result_df['top3_hit'].sum()),
+                        int(len(result_df) - result_df['top3_hit'].sum()),
+                        f"{result_df['top3_hit'].mean():.2%}",
+                        f"{result_df['top3_score'].mean():.2f}" if 'top3_score' in result_df.columns else "N/A"
+                    ]
+                }
+                top3_df = pd.DataFrame(top3_stats)
+                top3_df.to_excel(writer, sheet_name='Top3分析', index=False)
+
+        output.seek(0)
+        return output.getvalue()
+
+    def _create_final_summary_excel(self, all_results: Dict[str, Any], summary: Dict[str, Any],
+                                    file_bytes: bytes) -> bytes:
+        """创建最终汇总的Excel文件（5个sheet）"""
+        output = io.BytesIO()
+
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            # 读取原始数据
+            try:
+                original_df = pd.read_excel(io.BytesIO(file_bytes))
+            except:
+                original_df = pd.DataFrame()
+
+            # Sheet 1-4: 每个接口的详细结果
+            sheet_index = 1
+            for endpoint_name, result in all_results.items():
+                if result.get('status') == 'success':
+                    endpoint_result = result.get('result', {})
+                    result_data = endpoint_result.get('result_dataframe', [])
+
+                    if result_data:
+                        # 构建每行数据，包含原始数据字段和扩充字段
+                        rows = []
+                        for item in result_data:
+                            row = {}
+                            # 从原始Excel获取所有字段
+                            if 'scenario' in item:
+                                row['scenarios'] = item['scenario']
+                            if 'gold_original' in item:
+                                row['gold_answer'] = item['gold_original']
+                            if 'patient_info' in item:
+                                try:
+                                    patient_info = json.loads(item['patient_info']) if isinstance(item['patient_info'], str) else item['patient_info']
+                                    row['age'] = patient_info.get('age', '')
+                                    row['gender'] = patient_info.get('gender', '')
+                                    row['pregnancy_status'] = patient_info.get('pregnancy_status', '')
+                                    row['allergies'] = ','.join(patient_info.get('allergies', [])) if isinstance(patient_info.get('allergies'), list) else patient_info.get('allergies', '')
+                                    row['comorbidities'] = ','.join(patient_info.get('comorbidities', [])) if isinstance(patient_info.get('comorbidities'), list) else patient_info.get('comorbidities', '')
+                                    row['physical_examination'] = patient_info.get('physical_examination', '')
+                                except:
+                                    pass
+                            if 'clinical_context' in item:
+                                try:
+                                    clinical_context = json.loads(item['clinical_context']) if isinstance(item['clinical_context'], str) else item['clinical_context']
+                                    row['department'] = clinical_context.get('department', '')
+                                    row['chief_complaint'] = clinical_context.get('chief_complaint', '')
+                                    row['medical_history'] = clinical_context.get('medical_history', '')
+                                    row['present_illness'] = clinical_context.get('present_illness', '')
+                                    row['diagnosis'] = clinical_context.get('diagnosis', '')
+                                    row['symptom_duration'] = clinical_context.get('symptom_duration', '')
+                                    row['symptom_severity'] = clinical_context.get('symptom_severity', '')
+                                except:
+                                    pass
+
+                            # 扩充字段
+                            row['api_name'] = endpoint_name
+                            row['final_choices'] = item.get('pred_items', '')
+                            row['is_valid_sample'] = item.get('is_valid_sample', True)  # 添加有效性标记
+                            row['top1_hit'] = item.get('top1_hit', 0)
+                            row['top3_hit'] = item.get('top3_hit', 0)
+                            row['top1_accuracy'] = item.get('top1_hit', 0)
+                            row['top3_accuracy'] = item.get('top3_hit', 0)
+                            row['response_time_ms'] = item.get('processing_time_ms', 0)
+
+                            rows.append(row)
+
+                        result_df = pd.DataFrame(rows)
+
+                        # 计算汇总行统计数据 - 使用公共方法去除冗余
+                        stats = self._calculate_endpoint_statistics(rows, endpoint_name)
+
+                        # 添加汇总行
+                        summary_row = {col: '' for col in result_df.columns}
+                        summary_row.update({
+                            'scenarios': f'top1_hits={stats["top1_hit_count"]}',
+                            'gold_answer': f'top3_hits={stats["top3_hit_count"]}',
+                            'api_name': f'top1_accuracy={stats["top1_accuracy"]}',
+                            'final_choices': f'top3_accuracy={stats["top3_accuracy"]}',
+                            'is_valid_sample': f'valid={stats["total_samples"]}, invalid={stats["invalid_samples"]}',
+                            'top1_hit': '',
+                            'top3_hit': '',
+                            'top1_accuracy': '',
+                            'top3_accuracy': '',
+                            'response_time_ms': f'avg_time={stats["avg_response_time_ms"]}ms'
+                        })
+                        result_df = pd.concat([result_df, pd.DataFrame([summary_row])], ignore_index=True)
+
+                        result_df.to_excel(writer, sheet_name=f'Sheet{sheet_index}_{endpoint_name[:20]}', index=False)
+                        sheet_index += 1
+
+            # Sheet 5: 接口汇总（只有4行，每个接口一行）- 使用公共方法去除冗余
+            endpoint_summary = []
+            for endpoint_name, result in all_results.items():
+                if result.get('status') == 'success':
+                    endpoint_result = result.get('result', {})
+                    result_df_data = endpoint_result.get('result_dataframe', [])
+                    if result_df_data:
+                        stats = self._calculate_endpoint_statistics(result_df_data, endpoint_name)
+                        endpoint_summary.append(stats)
+
+            summary_df = pd.DataFrame(endpoint_summary)
+            summary_df.to_excel(writer, sheet_name='Sheet5_Summary', index=False)
+
+        output.seek(0)
+        return output.getvalue()
+
+    async def get_excel_preview(self, file_bytes: bytes) -> List[Dict[str, Any]]:
+        """获取Excel预览数据（异步）"""
+        try:
+            # 使用 asyncio.to_thread 在线程池中执行同步IO操作
+            import asyncio
+            df = await asyncio.to_thread(pd.read_excel, io.BytesIO(file_bytes))
+            return df.head(100).to_dict('records')
+        except Exception as e:
+            print(f"读取Excel预览失败: {e}")
+            return []
+
+    def submit_evaluation_task(
+        self,
+        file_bytes: bytes,
+        limit: Optional[int] = None,
+        top_scenarios: int = 3,
+        top_recommendations_per_scenario: int = 3,
+        similarity_threshold: float = 0.7,
+        min_appropriateness_rating: int = 5,
+    ) -> str:
+        """提交评测任务到Celery"""
+        from app.celery.tasks.evaluation_tasks import evaluate_all_endpoints_task
+        import os
+
+        os.makedirs("output_eval", exist_ok=True)
+
+        task = evaluate_all_endpoints_task.delay(
+            file_bytes=file_bytes,
+            limit=limit,
+            top_scenarios=top_scenarios,
+            top_recommendations_per_scenario=top_recommendations_per_scenario,
+            similarity_threshold=similarity_threshold,
+            min_appropriateness_rating=min_appropriateness_rating,
+        )
+        return task.id
+
+    def get_task_status(self, task_id: str) -> Dict[str, Any]:
+        """查询任务状态"""
+        from celery.result import AsyncResult
+
+        task_result = AsyncResult(task_id)
+
+        if task_result.state == 'PENDING':
+            return {"task_id": task_id, "status": "pending", "message": "任务等待执行中"}
+        elif task_result.state == 'STARTED':
+            return {"task_id": task_id, "status": "started", "message": "任务执行中"}
+        elif task_result.state == 'PROGRESS':
+            # 返回进度信息
+            progress_info = task_result.info or {}
+            return {
+                "task_id": task_id,
+                "status": "progress",
+                "message": progress_info.get("message", "任务进行中"),
+                "progress": {
+                    "completed": progress_info.get("completed", 0),
+                    "total": progress_info.get("total", 0),
+                    "percentage": progress_info.get("percentage", 0)
+                }
+            }
+        elif task_result.state == 'SUCCESS':
+            return {"task_id": task_id, "status": "success", "result": task_result.result, "message": "任务执行成功"}
+        elif task_result.state == 'FAILURE':
+            return {"task_id": task_id, "status": "failure", "error": str(task_result.info), "message": "任务执行失败"}
+        else:
+            return {"task_id": task_id, "status": task_result.state.lower(), "message": f"任务状态: {task_result.state}"}
+
+def normalize_text(text: str) -> str:
+    """标准化文本，去除空格和特殊字符"""
+    if not text:
+        return ""
+    return ''.join(text.split()).lower()
+
+def _hit(group: List[str], gold: str) -> int:
+    """检查推荐组中是否包含正确答案"""
+    gold_norm = normalize_text(gold)
+    for rec in group:
+        if normalize_text(rec) == gold_norm:
+            return 1
+    return 0
+
+def extract_recommendations_by_endpoint(endpoint: str, data: Dict[str, Any]) -> List[dict]:
+    """根据不同接口提取推荐结果"""
+    if endpoint in ["recommend_final_choices", "recommend_simple_final_choices"]:
+        # 提取fc_groups中的推荐项
+        fc_groups = data.get("Data", {}).get("best_recommendations", [])
+        recommendations = []
+        for group in fc_groups:
+            if isinstance(group, dict) and "final_choices" in group:
+                if isinstance(group['final_choices'], list):
+                    final_choices = list(group['final_choices'])
+                else:
+                    final_choices = []
+                overall_reason = group.get('overall_reasoning', '')
+                recommendations.append({"final_choices": final_choices, "overall_reason": overall_reason})
+            else:
+                # 如果是字符串列表
+                recommendations.append({"overall_reason": '', "final_choices": []})
+        return recommendations
+
+    elif endpoint == "intelligent-recommendation":
+        llm_recommendations = data.get("llm_recommendations", {})
+        recommendations_list = llm_recommendations.get("recommendations", [])
+        scenario = data.get("query", "")
+        final_choices = []
+
+        for recommend in recommendations_list:
+            if isinstance(recommend, dict):
+                procedure_name = recommend.get("procedure_name", "")
+                if procedure_name:
+                    final_choices.append(procedure_name)
+
+        recommendations = [{"scenario_description": scenario, "final_choices": final_choices}]
+        return recommendations
+
+    elif endpoint == "recommend_item":
+        # 根据您的测试，这个接口返回的应该是recommend_item
+        recommendations = data.get("data", [])
+        choices = []
+        if recommendations:
+           for recommend in recommendations:
+               if isinstance(recommend, dict):
+                   choices.append(recommend.get('check_item_name', ""))
+        return [{"final_choices": choices}]
+
+    return []

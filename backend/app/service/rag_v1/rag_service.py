@@ -1,5 +1,11 @@
-from typing import Any, Dict, List
+import asyncio
+import hashlib
+import json
+from typing import Any, Dict, List, Optional
 import time
+from langchain_core.messages import SystemMessage
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_openai import ChatOpenAI
 from sqlmodel.ext.asyncio.session import AsyncSession
 from app.core.language_model.model_client_wrapper import ChatClientSDK, EmbeddingClientSDK, RerankerClientSDK
 from app.entity.model_entity import DEFAULT_APP_CONFIG
@@ -15,12 +21,14 @@ from app.service.rag_v1.retrieval_service import RetrievalService
 from app.service.rag_v1.simple_retrieval_service import SimpleRetrievalService
 from app.service.rag_v1.adaptive_recommend_service import AdaptiveRecommendationEngineService
 from app.utils.logger.simple_logger import get_logger
+from app.config.config import settings
+from app.entity.retrieval_entity import  StructOutputPatient
+from app.config.redis_config import redis_manager
 logger = get_logger(__name__)
-"""
-科室: 心血管内科 ,
-临床场景: 35岁男性，高血压病史3年，规律服药，青霉素过敏，主诉反复头痛、头晕伴耳鸣1周，
-症状中度，体温36.8℃，血压130/85 mmHg，心肺听诊正常，考虑原发性高血压。
-"""
+
+
+
+
 
 class RagService:
 
@@ -34,6 +42,120 @@ class RagService:
           self.model_service = model_service
           self.retrieval_service = retrieval_service
           self.simple_retrieval_service=simple_retrieval_service
+          self.redis_client = redis_manager.async_client
+      async def get_struct_output(self, standard_query: str, timeout: float = 300):
+          """获取结构化输出，带Redis缓存和超时控制
+
+          Args:
+              standard_query: 标准查询文本
+              timeout: 超时时间（秒），默认10秒
+          """
+          # 生成缓存键
+          cache_key = f"struct_output:{hashlib.md5(standard_query.encode()).hexdigest()}"
+
+          try:
+              # 尝试从缓存获取
+              cached_result = await self.redis_client.get(cache_key)
+              if cached_result:
+                  logger.info(f"✅ 从缓存获取struct_output")
+                  cached_data = json.loads(cached_result)
+                  return StructOutputPatient(**cached_data)
+          except Exception as e:
+              logger.warning(f"⚠️  Redis缓存读取失败: {e}")
+
+          # 缓存未命中，调用LLM（带超时控制）
+          try:
+              prompt = ChatPromptTemplate.from_messages(
+                  [SystemMessage("你是一个按照指令生成回复的助手，请你根据输入的文本生成相应的数据，请你注意，如果文本里没有相应字段的数据，置为未知"),
+                   ("user", "这是输入的文本:{text}")
+                  ]
+              )
+
+              model = ChatOpenAI(
+                  model=settings.OLLAMA_LLM_MODEL,
+                  api_key=settings.SILICONFLOW_API_KEY,
+                  base_url=settings.OLLAMA_BASE_URL,
+                  temperature=1,
+                  max_tokens=1024,
+                  streaming=False,
+              ).with_structured_output(StructOutputPatient)
+
+              chain = prompt | model
+
+              # 使用asyncio.wait_for添加额外超时保护
+              response = await asyncio.wait_for(
+                  chain.ainvoke({"text": standard_query}),
+                  timeout=timeout
+              )
+
+              # 存入缓存（TTL: 1小时 = 3600秒）
+              try:
+                  await self.redis_client.setex(
+                      cache_key,
+                      3600,
+                      json.dumps(response.model_dump())
+                  )
+                  logger.info(f"✅ struct_output已缓存")
+              except Exception as e:
+                  logger.warning(f"⚠️  Redis缓存写入失败: {e}")
+
+              return response
+
+          except asyncio.TimeoutError:
+              logger.error(f"❌ struct_output调用超时 ({timeout}秒)")
+              # 返回空结构，避免阻塞整个流程
+              return StructOutputPatient(patient_info={}, clinical_context={})
+
+
+      async def _process_struct_output_if_needed(
+              self,
+              request: IntelligentRecommendationRequest
+      ) -> None:
+          """处理标准查询并更新request对象"""
+          if request.standard_query and isinstance(request.standard_query, str) and request.standard_query!="":
+              res = await self.get_struct_output(request.standard_query)
+              request.patient_info = res.patient_info
+              request.clinical_context = res.clinical_context
+
+      def _build_response(
+              self,
+              request: IntelligentRecommendationRequest,
+              best_recommendations: List[Dict[str, Any]],
+              processing_time_ms: int,
+              retrieval_config: RetrievalRequest,
+              strategy: RerankingStrategy,
+              error_message: Optional[str] = None
+      ) -> IntelligentRecommendationResponse:
+          """构建响应对象"""
+          return IntelligentRecommendationResponse(
+              query=f"{request.clinical_context.chief_complaint} | {request.clinical_context.diagnosis or ''}",
+              best_recommendations=best_recommendations,
+              processing_time_ms=processing_time_ms,
+              similarity_threshold=retrieval_config.similarity_threshold,
+              strategy_used=strategy.value,
+              error_message=error_message
+          )
+
+
+
+      def _initialize_retrieval_config(
+                  self,
+                  request: IntelligentRecommendationRequest
+          ) -> tuple[SearchStrategy, RetrievalRequest, RerankingStrategy, int]:
+              """初始化检索配置"""
+              search_strategy = request.search_strategy or SearchStrategy()
+              retrieval_config = request.retrieval_strategy or RetrievalRequest()
+              strategy = retrieval_config.reranking_strategy
+              initial_top_k = self._calculate_initial_top_k(retrieval_config)
+
+              logger.info(f"🚀 开始智能推荐，使用策略: {strategy.value}")
+              logger.info(f"   规则过滤: {retrieval_config.apply_rule_filter}, "
+                          f"LLM重排序: {retrieval_config.enable_reranking}, "
+                          f"LLM推荐: {retrieval_config.need_llm_recommendations}")
+
+              return search_strategy, retrieval_config, strategy, initial_top_k
+
+
 
       async def generate_intelligent_recommendation(
               self,
@@ -48,32 +170,20 @@ class RagService:
           2. 根据策略枚举执行相应的重排序逻辑
           3. 返回结构化结果
           """
-          standard_query=""
           start_time = time.time()
-          if request.standard_query and isinstance(request.standard_query, str):
-              standard_query = request.standard_query
+          # 处理标准查询
+          await self._process_struct_output_if_needed(request)
+
+
+
+
           try:
               # ========== 1. 执行四阶段混合检索 ==========
-
-
-              search_strategy = request.search_strategy or SearchStrategy()
-
-              # 获取检索策略配置
-              retrieval_config = request.retrieval_strategy or RetrievalRequest()
-              strategy = retrieval_config.reranking_strategy
-
-              logger.info(f"🚀 开始智能推荐，使用策略: {strategy.value}")
-              logger.info(f"   规则过滤: {retrieval_config.apply_rule_filter}, "
-                          f"LLM重排序: {retrieval_config.enable_reranking}, "
-                          f"LLM推荐: {retrieval_config.need_llm_recommendations}")
-
-              # 计算初始检索数量
-              initial_top_k = self._calculate_initial_top_k(retrieval_config)
+              search_strategy, retrieval_config, strategy, initial_top_k = self._initialize_retrieval_config(request)
 
               final_scenarios = await self.retrieval_service.retrieve_clinical_scenarios(
                   patient_info=request.patient_info,
                   clinical_context=request.clinical_context,
-                  standard_query=standard_query,
                   search_strategy=search_strategy,
                   top_k=initial_top_k,
                   similarity_threshold=retrieval_config.similarity_threshold,
@@ -91,18 +201,15 @@ class RagService:
                   max_scenarios=retrieval_config.top_scenarios,
                   max_recommendations_per_scenario=retrieval_config.top_recommendations_per_scenario
               )
+              if isinstance(best_recommendations,dict):
+                  best_recommendations=[best_recommendations]
 
               # ========== 3. 计算处理时间 ==========
               processing_time_ms = int((time.time() - start_time) * 1000)
 
               # ========== 4. 返回结构化响应 ==========
-              return IntelligentRecommendationResponse(
-                  query=f"{request.clinical_context.chief_complaint} | {request.clinical_context.diagnosis or ''}",
-                  best_recommendations=best_recommendations,
-                  processing_time_ms=processing_time_ms,
-                  similarity_threshold=retrieval_config.similarity_threshold,
-                  strategy_used=strategy.value
-              )
+              return self._build_response(request, best_recommendations, processing_time_ms, retrieval_config, strategy)
+
 
           except Exception as e:
               logger.error(f"❌ 智能推荐失败: {str(e)}")
@@ -113,42 +220,7 @@ class RagService:
                   error_message=str(e)
               )
 
-      async def stream_direct_recommendation(
-              self,
-              request: IntelligentRecommendationRequest,
-              medical_dict: Dict[str, Any]
-      ):
-          """流式返回LLM生成的直接推荐文本（先推荐项目，再推荐理由）。"""
-          search_strategy = request.search_strategy or SearchStrategy()
-          retrieval_config = request.retrieval_strategy or RetrievalRequest()
-          initial_top_k = self._calculate_initial_top_k(retrieval_config)
 
-          scenarios = await self.retrieval_service.retrieve_clinical_scenarios(
-              patient_info=request.patient_info,
-              clinical_context=request.clinical_context,
-              standard_query=request.standard_query or "",
-              search_strategy=search_strategy,
-              need_optimize_query=request.need_optimize_query,
-              top_k=initial_top_k,
-              similarity_threshold=retrieval_config.similarity_threshold,
-              medical_dict=medical_dict
-          )
-          scenarios_with_recs = await self.retrieval_service.get_scenarios_with_recommends(
-              scenarios,
-              max_scenarios=retrieval_config.top_scenarios,
-              max_recommendations_per_scenario=retrieval_config.top_recommendations_per_scenario,
-              min_rating=retrieval_config.min_appropriateness_rating or 5
-          )
-          engine = AdaptiveRecommendationEngineService()
-          prompt = engine._build_single_call_prompt(
-              confirmed_scenarios=scenarios_with_recs,
-              patient_info=request.patient_info,
-              clinical_context=request.clinical_context,
-              max_recommendations_per_scenario=retrieval_config.top_recommendations_per_scenario,
-              direct_return=True
-          )
-          async for chunk in self.retrieval_service.ai_service._stream_llm(prompt):
-              yield chunk
 
       def _calculate_initial_top_k(self, retrieval_config: RetrievalRequest) -> int:
           """计算初始检索数量"""
@@ -176,35 +248,19 @@ class RagService:
           standard_query=""
           start_time = time.time()
           try:
-              if request.standard_query and isinstance(request.standard_query,str):
-                  standard_query=request.standard_query
+              await self._process_struct_output_if_needed(request)
 
-
-              if request.retrieval_strategy.top_scenarios>=5:
+              # 场景数量验证
+              if request.retrieval_strategy.top_scenarios >= 5:
                   raise ValidationException(message="请求的最大场景数不能超过5个！")
-             
-              # ========== 1. 执行四阶段混合检索 ==========
-              search_strategy = request.search_strategy or SearchStrategy()
 
-              # 获取检索策略配置
-              retrieval_config = request.retrieval_strategy or RetrievalRequest()
-              strategy = retrieval_config.reranking_strategy
+              # ========== 1. 初始化检索配置 ==========
+              search_strategy, retrieval_config, strategy, initial_top_k = self._initialize_retrieval_config(request)
 
-              logger.info(f"🚀 开始智能推荐，使用策略: {strategy.value}")
-              logger.info(f"   规则过滤: {retrieval_config.apply_rule_filter}, "
-                          f"LLM重排序: {retrieval_config.enable_reranking}, "
-                          f"LLM推荐: {retrieval_config.need_llm_recommendations}")
-
-
-
-
-              # 计算初始检索数量
-              initial_top_k = self._calculate_initial_top_k(retrieval_config)
 
               final_scenarios = await self.retrieval_service.retrieve_clinical_scenarios(
                   patient_info=request.patient_info,
                   clinical_context=request.clinical_context,
-                  standard_query=standard_query,
                   search_strategy=search_strategy,
                   top_k=initial_top_k,
                   similarity_threshold=retrieval_config.similarity_threshold,
@@ -224,23 +280,16 @@ class RagService:
 
               # ========== 3. 计算处理时间 ==========
               processing_time_ms = int((time.time() - start_time) * 1000)
-
+              if isinstance(best_recommendations, dict):
+                  best_recommendations = [best_recommendations]
               # ========== 4. 返回结构化响应 ==========
-              return IntelligentRecommendationResponse(
-                  query=f"{request.clinical_context.chief_complaint} | {request.clinical_context.diagnosis or ''}",
-                  best_recommendations=best_recommendations,
-                  processing_time_ms=processing_time_ms,
-                  similarity_threshold=retrieval_config.similarity_threshold,
-                  strategy_used=strategy.value
-              )
+              return self._build_response(request, best_recommendations, processing_time_ms, retrieval_config, strategy)
+
 
           except Exception as e:
                raise InternalServerException(
                    message=str(e)
                )
-
-
-
 
 
 
@@ -423,35 +472,7 @@ class RagService:
               raise NotImplementedError("聊天模型接口未实现")
 
 
-if __name__ == '__main__':
-    import asyncio
-    from app.schema.IntelligentRecommendation_schemas import PatientInfo, ClinicalContext
-    
-    async def test():
-        # 这里需要实际的数据库会话
-        # rag_service = RagService(
-        #     session=session,
-        #     model_service=LanguageModelService(),
-        #     language_model_manager=LanguageModelManager()
-        # )
-        # 
-        # request = IntelligentRecommendationRequest(
-        #     patient_info=PatientInfo(
-        #         age=45,
-        #         gender="female",
-        #         pregnancy_status="not_applicable"
-        #     ),
-        #     clinical_context=ClinicalContext(
-        #         chief_complaint="胸痛",
-        #         diagnosis="疑似冠心病"
-        #     )
-        # )
-        # 
-        # response = await rag_service.generate_intelligent_recommendation(request)
-        # print(response)
-        pass
-    
-    asyncio.run(test())
+
 
 
 

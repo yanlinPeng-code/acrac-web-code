@@ -3,7 +3,7 @@
  */
 
 import { useState, useRef } from "react"
-import { Layout, Menu, Upload, Radio, Button, Card, Typography, message, Spin, Divider, Badge } from "antd"
+import { Layout, Menu, Upload, Radio, Button, Card, Typography, message, Spin, Divider, Badge, InputNumber, Table, Progress } from "antd"
 import type { UploadFile } from "antd"
 import {
   FileTextOutlined,
@@ -17,7 +17,7 @@ import {
 import type { EvalMode, EndpointType, SingleEvaluationData, AllEvaluationData } from "./types/evaluation"
 
 // API请求
-import { evaluateSingleEndpoint, evaluateAllEndpoints } from "./api/evaluation"
+import { evaluateSingleEndpoint, evaluateAllEndpoints, getTaskStatus, previewExcelData } from "./api/evaluation"
 import { ENDPOINTS } from "./api/config"
 
 // 工具函数
@@ -69,6 +69,13 @@ export default function App() {
   const [patientId] = useState<string>(generateRandomId())
   const [doctorId] = useState<string>(generateRandomId())
 
+  // 评测限制条数
+  const [evaluationLimit, setEvaluationLimit] = useState<number | null>(null)
+
+  // Excel预览数据
+  const [excelPreview, setExcelPreview] = useState<any[]>([])
+  const [loadingPreview, setLoadingPreview] = useState(false)
+
   // 运行状态
   const [loading, setLoading] = useState(false)
   const [evaluationResult, setEvaluationResult] = useState<SingleEvaluationData | null>(null)
@@ -76,12 +83,47 @@ export default function App() {
   const startTs = useRef<number>(0)
   const [clientLatencyMillis, setClientLatencyMillis] = useState<number | null>(null)
 
+  // 进度信息
+  const [progressPercentage, setProgressPercentage] = useState<number>(0)
+  const [progressMessage, setProgressMessage] = useState<string>("")
+  const [isEvaluating, setIsEvaluating] = useState<boolean>(false)
+
   // 侧边栏选中项
   const [selectedMenu, setSelectedMenu] = useState<string>("config")
 
   // 获取当前模式的文件
   const currentFiles = evalMode === "single" ? singleModeFiles : allModeFiles
   const setCurrentFiles = evalMode === "single" ? setSingleModeFiles : setAllModeFiles
+
+  /**
+   * 处理文件上传（all模式下自动预览）
+   */
+  const handleFileChange = async (info: any) => {
+    const newFiles = info.fileList.slice(0, 1)
+    setCurrentFiles(newFiles)
+
+    // 仅在all模式下自动预览
+    if (evalMode === "all" && newFiles.length > 0) {
+      const file = newFiles[0].originFileObj as File
+      if (file) {
+        setLoadingPreview(true)
+        setExcelPreview([])
+        try {
+          const response = await previewExcelData(file)
+          setExcelPreview(response.Data.preview)
+          message.success(`成功加载 ${response.Data.preview_limit} 行预览数据`)
+        } catch (e: any) {
+          message.error(e?.message || "预览加载失败")
+          setExcelPreview([])
+        } finally {
+          setLoadingPreview(false)
+        }
+      }
+    } else if (evalMode === "single" || newFiles.length === 0) {
+      // single模式或清空文件时，清空预览
+      setExcelPreview([])
+    }
+  }
 
   /**
    * 执行单个接口评测
@@ -151,7 +193,7 @@ export default function App() {
   }
 
   /**
-   * 执行所有接口并发评测
+   * 执行所有接口并发评测（异步）
    */
   const runAllEvaluate = async () => {
     if (allModeFiles.length === 0) {
@@ -169,10 +211,13 @@ export default function App() {
     setEvaluationResult(null)
     setAllEvaluationResult(null)
     setClientLatencyMillis(null)
+    setProgressPercentage(0)
+    setProgressMessage("正在提交任务...")
+    setIsEvaluating(false)
     startTs.current = Date.now()
 
     try {
-      const params = {
+      const params: any = {
         file,
         top_scenarios: topScenarios,
         top_recommendations_per_scenario: topRecommendationsPerScenario,
@@ -180,18 +225,66 @@ export default function App() {
         min_appropriateness_rating: minAppropriatenessRating,
       }
 
-      const response = await evaluateAllEndpoints(params)
-      setClientLatencyMillis(Date.now() - startTs.current)
-      setAllEvaluationResult(response.Data)
-      message.success("所有接口评测完成！")
-      // 自动跳转到结果页
-      setSelectedMenu("result")
+      // 添加limit参数
+      if (evaluationLimit !== null && evaluationLimit > 0) {
+        params.limit = evaluationLimit
+      }
+
+      // 提交任务
+      const submitResponse = await evaluateAllEndpoints(params)
+      const responseData = submitResponse.Data as { task_id: string; status: string }
+      const taskId = responseData.task_id
+
+      // 立即关闭loading并提示成功
+      setLoading(false)
+      setIsEvaluating(true)
+      setProgressPercentage(0)
+      setProgressMessage("任务已提交，评测进行中...")
+      message.success("任务提交成功！评测正在后台进行...")
+
+      // 轮询任务状态
+      const pollInterval = setInterval(async () => {
+        try {
+          const statusResponse = await getTaskStatus(taskId)
+          const statusData = statusResponse.Data as any
+
+          if (statusData.status === "success") {
+            clearInterval(pollInterval)
+            setProgressPercentage(100)
+            setProgressMessage("评测完成")
+            setClientLatencyMillis(Date.now() - startTs.current)
+            setAllEvaluationResult(statusData.result)
+            setIsEvaluating(false)
+            message.success("所有接口评测完成！")
+            setSelectedMenu("result")
+          } else if (statusData.status === "failure") {
+            clearInterval(pollInterval)
+            setClientLatencyMillis(Date.now() - startTs.current)
+            setProgressMessage("评测失败")
+            setIsEvaluating(false)
+            message.error(statusData.error || "评测失败")
+          } else if (statusData.status === "progress") {
+            // 更新进度
+            const progress = statusData.progress || {}
+            setProgressPercentage(progress.percentage || 0)
+            setProgressMessage(statusData.message || "评测进行中...")
+          } else if (statusData.status === "started" || statusData.status === "pending") {
+            setProgressMessage(statusData.message || "任务启动中...")
+          }
+        } catch (e: any) {
+          clearInterval(pollInterval)
+          setClientLatencyMillis(Date.now() - startTs.current)
+          setProgressMessage("查询状态失败")
+          setIsEvaluating(false)
+          message.error(e?.message || "查询任务状态失败")
+        }
+      }, 2000) // 每2秒轮询一次
+
     } catch (e: any) {
       setClientLatencyMillis(Date.now() - startTs.current)
-      message.error(e?.message || "评测失败")
-      console.error(e)
-    } finally {
+      message.error(e?.message || "提交评测任务失败")
       setLoading(false)
+      setIsEvaluating(false)
     }
   }
 
@@ -273,12 +366,13 @@ export default function App() {
                 <Upload
                   fileList={currentFiles}
                   beforeUpload={() => false}
-                  onChange={(info) => setCurrentFiles(info.fileList.slice(0, 1))}
+                  onChange={handleFileChange}
                   maxCount={1}
                   accept=".xlsx,.xls"
+                  disabled={loadingPreview}
                 >
-                  <Button icon={<FileTextOutlined />} size="large">
-                    选择Excel文件
+                  <Button icon={<FileTextOutlined />} size="large" loading={loadingPreview}>
+                    {loadingPreview ? "加载预览中..." : "选择Excel文件"}
                   </Button>
                 </Upload>
                 {currentFiles.length > 0 && (
@@ -286,6 +380,68 @@ export default function App() {
                     <Text type="success">
                       ✓ 已选择文件: {currentFiles[0].name}
                     </Text>
+                  </div>
+                )}
+
+                {/* 评测条数限制 - 仅在all模式显示 */}
+                {evalMode === "all" && currentFiles.length > 0 && (
+                  <div style={{ marginTop: 16 }}>
+                    <Text strong>评测数据条数: </Text>
+                    <InputNumber
+                      min={1}
+                      placeholder="默认全部"
+                      value={evaluationLimit}
+                      onChange={(value) => setEvaluationLimit(value)}
+                      style={{ width: 200, marginLeft: 8 }}
+                    />
+                    <Text type="secondary" style={{ marginLeft: 8 }}>
+                      （不填则评测全部数据）
+                    </Text>
+                  </div>
+                )}
+
+                {/* 评测进度条 - 在all模式且评测进行中时显示 */}
+                {evalMode === "all" && isEvaluating && (
+                  <div style={{ marginTop: 16 }}>
+                    <Divider orientation="left">评测进度</Divider>
+                    <div style={{ padding: "16px", background: "#f5f5f5", borderRadius: 8 }}>
+                      <Progress
+                        percent={progressPercentage}
+                        status={progressPercentage === 100 ? "success" : "active"}
+                        strokeColor={{
+                          '0%': '#108ee9',
+                          '100%': '#87d068',
+                        }}
+                      />
+                      <div style={{ marginTop: 12, textAlign: "center" }}>
+                        <Text type="secondary">{progressMessage}</Text>
+                      </div>
+                      {clientLatencyMillis && (
+                        <div style={{ marginTop: 8, textAlign: "center" }}>
+                          <Text type="secondary">已用时: {Math.floor(clientLatencyMillis / 1000)}秒</Text>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Excel预览 - 仅在all模式且有预览数据时显示 */}
+                {evalMode === "all" && excelPreview.length > 0 && (
+                  <div style={{ marginTop: 16 }}>
+                    <Divider orientation="left">数据预览（前10条）</Divider>
+                    <Table
+                      dataSource={excelPreview.slice(0, 10)}
+                      columns={Object.keys(excelPreview[0] || {}).map((key) => ({
+                        title: key,
+                        dataIndex: key,
+                        key: key,
+                        ellipsis: true,
+                        width: 150,
+                      }))}
+                      pagination={false}
+                      scroll={{ x: 'max-content' }}
+                      size="small"
+                    />
                   </div>
                 )}
               </Card>
@@ -466,13 +622,31 @@ export default function App() {
             zIndex: 9999,
           }}
         >
-          <Card style={{ textAlign: "center", minWidth: 300 }}>
+          <Card style={{ textAlign: "center", minWidth: 400, padding: "20px" }}>
             <Spin size="large" />
             <div style={{ marginTop: 16, fontSize: 16 }}>
               <Text strong>评测进行中，请稍候...</Text>
             </div>
+
+            {/* 进度条 - 仅在all模式显示 */}
+            {evalMode === "all" && (
+              <div style={{ marginTop: 20 }}>
+                <Progress
+                  percent={progressPercentage}
+                  status={progressPercentage === 100 ? "success" : "active"}
+                  strokeColor={{
+                    '0%': '#108ee9',
+                    '100%': '#87d068',
+                  }}
+                />
+                <div style={{ marginTop: 12 }}>
+                  <Text type="secondary">{progressMessage}</Text>
+                </div>
+              </div>
+            )}
+
             {clientLatencyMillis && (
-              <div style={{ marginTop: 8 }}>
+              <div style={{ marginTop: 12 }}>
                 <Text type="secondary">已用时: {Math.floor(clientLatencyMillis / 1000)}秒</Text>
               </div>
             )}

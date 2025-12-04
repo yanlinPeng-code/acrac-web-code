@@ -1,5 +1,6 @@
 
 import asyncio
+import os
 import threading
 from threading import Thread
 from typing import Optional
@@ -15,6 +16,11 @@ from app.service.rag_v1.embedding_service import EmbeddingsService
 
 # 向量数据库的集合名字
 COLLECTION_NAME = "Datasets"
+
+# Milvus 配置（从环境变量读取）
+MILVUS_URI = os.getenv("MILVUS_URI", "http://localhost:19530")
+MILVUS_DB_NAME = os.getenv("MILVUS_DB_NAME", "acrac")
+MILVUS_COLLECTION_NAME = os.getenv("MILVUS_COLLECTION_NAME", "scenarios")
 
 
 
@@ -52,8 +58,8 @@ class VectorDatabaseService:
                     if self._milvus_store is None:
                         self._milvus_store=Milvus(
                                             embedding_function=self.embeddings_service.cache_backed_embeddings,  # 你的密集向量模型
-                                            connection_args={"uri": "http://10.101.1.178:19530", "db_name": "acrac"},
-                                            collection_name="scenarios",
+                                            connection_args={"uri": MILVUS_URI, "db_name": MILVUS_DB_NAME},
+                                            collection_name=MILVUS_COLLECTION_NAME,
                                             # builtin_function=BM25BuiltInFunction(  # 关联BM25函数（生成稀疏向量到text_sparse）
                                             #     input_field_names="text",
                                             #     output_field_names="text_sparse",

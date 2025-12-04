@@ -10,7 +10,7 @@ class PatientInfo(BaseModel):
     """患者基本信息"""
     age: Optional[int] = Field(None, description="患者年龄", ge=0, le=150)
     gender: Optional[str] = Field(None, description="患者性别：男/女")
-    pregnancy_status: Optional[str] = Field(None, description="妊娠状态：妊娠期/哺乳期/非妊娠期")
+    pregnancy_status: Optional[str] = Field(None, description="妊娠状态：可以是妊娠期/哺乳期/非妊娠期")
     allergies: Optional[List[str]] = Field(None, description="过敏史列表")
     comorbidities: Optional[List[str]] = Field(None, description="合并症列表")
     physical_examination: Optional[str] = Field(None, description="检查报告")
@@ -18,8 +18,8 @@ class PatientInfo(BaseModel):
 
 class ClinicalContext(BaseModel):
     """临床上下文信息"""
-    department: Optional[str]= Field(..., description="科室名称", min_length=2, max_length=50)
-    chief_complaint: Optional[str] = Field(..., description="主诉", min_length=2, max_length=500)
+    department: Optional[str] = Field(None, description="科室名称", max_length=50)
+    chief_complaint: Optional[str] = Field(None, description="主诉", max_length=500)
     medical_history: Optional[str] = Field(None, description="既往病史", max_length=2000)
     present_illness: Optional[str] = Field(None, description="现病史", max_length=2000)
     diagnosis: Optional[str] = Field(None, description="医生主诊断结果", max_length=500)
@@ -55,8 +55,8 @@ class RetrievalRequest(BaseModel):
     enable_reranking: Optional[bool] = Field(True, description="是否启用llm重排序")
     need_llm_recommendations: Optional[bool] = Field(True, description="是否基于这些场景进行llm的推荐")
     apply_rule_filter: Optional[bool] = Field(True, description="是否应用规则过滤")
-    top_scenarios: Optional[int] = Field(10, description="返回的场景数量", ge=1, le=50)
-    top_recommendations_per_scenario: Optional[int] = Field(5, description="每个场景的推荐数量", ge=1, le=20)
+    top_scenarios: Optional[int] = Field(3, description="返回的场景数量", ge=1, le=4)
+    top_recommendations_per_scenario: Optional[int] = Field(3, description="每个场景的推荐数量", ge=1, le=3)
     similarity_threshold: Optional[float] = Field(0.6, description="相似度阈值", ge=0.1, le=0.9)
     min_appropriateness_rating: Optional[int] = Field(None, description="最低适宜性评分", ge=1, le=9)
 

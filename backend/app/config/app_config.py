@@ -9,6 +9,7 @@ from app.core.language_model.registry import model_registry
 from app.response.exception.global_exception import GlobalReOrExHandler
 from app.response.response_middleware import ResponseMiddleware
 from app.controller.rag_v1 import recommend_router
+from app.controller.rag_v2 import recommend_router_v2
 from app.utils.jieba_middleware import jiebaLoader
 from app.utils.logger.simple_logger import setup_logging
 from app.utils.logger.simple_logger import get_logger
@@ -79,6 +80,7 @@ async def register_router(app:FastAPI):
     app.include_router(recommend_router)
     app.include_router(evl_router)
     app.include_router(judge_router)
+    app.include_router(recommend_router_v2)
     logger.info("注册路由完成")
 
 
